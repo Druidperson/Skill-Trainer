@@ -1,0 +1,4 @@
+{
+  "namespace": "skillTrainer",
+  "setup": "setup.mjs"
+}
