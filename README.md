@@ -15,6 +15,8 @@ Add it to the queue and press Start. The queue panel is the list button right ne
 
 Name an item and an amount. Make 500 Bronze Bars and the queue mines the ore, smelts it and stops at 500. If you already have some of the ore in your bank, it uses that first.
 
+Some recipes need things the queue can't gather or craft, like feathers, herbs or monster drops. Those show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
+
 ## Reach a level
 
 Aim for a level and it works out the best method for each stretch of the climb. It counts everything a method takes, materials included, so you never end up farming ore for hours to earn a few points of XP. It only switches methods when a clearly better one opens up, so the plan doesn't turn into lots of tiny steps.
