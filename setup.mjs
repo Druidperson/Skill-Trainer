@@ -587,114 +587,8 @@ export function setup(ctx) {
       return { ...base, qty: n.need ?? n.qty, kind: "manual", label: `Get ${nm(n.item)}`, note: plain(sourceText(n.item.id)) };
     });
 
-  const AREA_KINDS = [
-    ["combatAreas", "Combat Area"], ["slayerAreas", "Slayer Area"], ["dungeons", "Dungeon"],
-    ["strongholds", "Stronghold"], ["abyssDepths", "Abyssal Depth"],
-  ];
-  const ATTACK_ICON = { melee: "melvorD:Attack", ranged: "melvorD:Ranged", magic: "melvorD:Magic" };
   const cap = (t) => String(t).charAt(0).toUpperCase() + String(t).slice(1);
-  const TRIANGLE = { melee: "magic", ranged: "melee", magic: "ranged" }; // what beats what: Magic > Melee > Ranged > Magic
   const statVal = (m, key) => (m.equipmentStats ?? []).find((x) => x.key === key)?.value ?? 0;
-  const styleChip = (t, cls = "", title = "", extra = "") => {
-    const sk = skillById(ATTACK_ICON[t]);
-    return chip(`${sk ? icon(sk) : ""}${esc(cap(t))}${extra}`, cls, title);
-  };
-  const row = (label, chips) => (chips.length ? `<div class="mst-row"><div class="mst-rowlbl">${label}</div><div class="mst-chips">${chips.join("")}</div></div>` : "");
-  const combatSection = (m) => {
-    const styles = m.attackType === "random" ? ["melee", "ranged", "magic"] : m.attackType ? [m.attackType] : [];
-    const attacks = styles.map((t) => styleChip(t));
-    if (m.attackType === "random") attacks.push(chip("<small>picks one at random</small>"));
-    if (m.damageType && m.damageType.id !== "melvorD:Normal") attacks.push(chip(`${typeof m.damageType.media === "string" ? icon(m.damageType) : ""}${esc(nm(m.damageType))}`));
-    const specials = (m.specialAttacks ?? []).filter((x) => x?.attack).map((x) => chip(`${esc(nm(x.attack))} <small>${num(x.chance)}%</small>`, "", plain(String(x.attack.description ?? ""))));
-    const passives = (m.passives ?? []).map((x) => chip(esc(nm(x)), "", plain(String(x.description ?? ""))));
-    const def = { melee: statVal(m, "meleeDefenceBonus"), ranged: statVal(m, "rangedDefenceBonus"), magic: statVal(m, "magicDefenceBonus") };
-    const low = Math.min(def.melee, def.ranged, def.magic);
-    const lowStyles = new Set(Object.keys(def).filter((k) => def[k] === low && !(def.melee === def.ranged && def.ranged === def.magic)));
-    const tri = TRIANGLE[m.attackType];
-    const weak = [];
-    if (tri) weak.push(styleChip(tri, "ok", `Combat triangle: ${cap(tri)} beats ${cap(m.attackType)}`, ` <small>beats ${cap(m.attackType)}</small>`));
-    for (const k of lowStyles) {
-      if (k === tri) continue;
-      weak.push(styleChip(k, "ok", `Lowest defence bonus (${def[k]})`, ` <small>low defence</small>`));
-    }
-    const defence = ["melee", "ranged", "magic"].map((k) => styleChip(k, lowStyles.has(k) ? "ok" : "", `${cap(k)} defence bonus`, ` <small>${def[k] > 0 ? "+" : ""}${num(def[k])}</small>`));
-    const resist = (m.equipmentStats ?? []).filter((x) => x.key === "resistance" && x.value).map((x) =>
-      chip(`${x.damageType && typeof x.damageType.media === "string" ? icon(x.damageType) : ""}${esc(nm(x.damageType))} <small>${num(x.value)}%</small>`, "", x.value > 0 ? "Damage reduction" : "Takes extra damage"));
-    return `<div class="mst-step"><div class="mst-stepno">Combat</div>` +
-      row("Attacks with", attacks) + row("Special attacks", specials) + row("Passives", passives) +
-      row("Weak to", weak) + row("Defence bonus", defence) + row("Resists", resist) + `</div>`;
-  };
-
-  // food and equipment sets, so the player can get ready for a fight
-  const foodHtml = () => {
-    const pl = game.combat?.player;
-    const slots = pl?.food?.slots ?? [];
-    const foods = slots.map((sl, i) => ({ sl, i })).filter((x) => x.sl.item && x.sl.quantity > 0);
-    if (!foods.length) return chip('<i class="fa fa-exclamation-triangle"></i>&nbsp;No food equipped', "warn", "Equip food before fighting");
-    return foods.map(({ sl, i }) => chip(`${icon(sl.item)}${esc(nm(sl.item))} <small>&times;${num(sl.quantity)}</small>`, i === pl.food.selectedSlot ? "ok" : "", i === pl.food.selectedSlot ? "Food in use" : "Backup food")).join("");
-  };
-  let setMsg = "";
-  const switchSet = (i) => {
-    const pl = game.combat?.player;
-    setMsg = "";
-    try { pl.changeEquipmentSet(i); } catch (e) { console.warn("[Skill Trainer]", e); }
-    if (pl && pl.selectedEquipmentSet !== i) setMsg = "Couldn't switch sets right now (you may be in combat, or the set has a restriction).";
-  };
-  const setsHtml = () => {
-    const pl = game.combat?.player;
-    const sets = pl?.equipmentSets ?? [];
-    if (!sets.length) return "";
-    const sel = pl.selectedEquipmentSet;
-    const itemsOf = (st) => (st.equipment?.equippedArray ?? []).filter((x) => !x.isEmpty && x.item);
-    const btns = sets.map((st, i) => {
-      const names = itemsOf(st).map((x) => nm(x.item)).join(", ") || "Nothing equipped";
-      return `<button type="button" class="btn btn-sm ${i === sel ? "btn-primary" : "btn-outline-secondary"}" data-mst-set="${i}" title="${esc(names)}">${i === sel ? '<i class="fa fa-check mr-1"></i>' : ""}Set ${i + 1}</button>`;
-    }).join("");
-    const worn = itemsOf(sets[sel] ?? sets[0]);
-    return `<div class="mst-chips">${btns}</div>` +
-      `<div class="mst-chips">${worn.length ? worn.map((x) => chip(`${icon(x.item)}${esc(nm(x.item))}`, "", nm(x.item))).join("") : chip("Nothing equipped in this set")}</div>` +
-      (setMsg ? `<div class="mst-chips">${chip(esc(setMsg), "warn")}</div>` : "");
-  };
-  const gearSection = () => {
-    if (!game.combat?.player) return "";
-    return `<div class="mst-step"><div class="mst-stepno">Gear</div>` +
-      `<div class="mst-row"><div class="mst-rowlbl">Food</div><div class="mst-chips mst-food">${foodHtml()}</div></div>` +
-      `<div class="mst-row"><div class="mst-rowlbl">Equipment sets (click to switch)</div><div class="mst-sets">${setsHtml()}</div></div></div>`;
-  };
-
-  const monsterSection = (m, kills) => {
-    const places = [];
-    for (const [key, label] of AREA_KINDS) {
-      for (const a of list(game[key])) {
-        if ((a.monsters ?? []).includes(m)) {
-          const slv = a.slayerLevelRequired ? ` &middot; Slayer Lv ${a.slayerLevelRequired}` : "";
-          places.push(`<div class="mst-place">${icon(a)}<b>${label}:</b> ${esc(nm(a))}${slv}</div>`);
-        }
-      }
-    }
-    const chips = [];
-    if (m.combatLevel !== undefined) chips.push(chip(`Combat Level: <b>${num(m.combatLevel)}</b>`));
-    const hpLvl = m.levels?.Hitpoints;
-    if (hpLvl !== undefined) {
-      const hp = hpLvl * (typeof numberMultiplier === "number" ? numberMultiplier : 10);
-      const hs = skillById("melvorD:Hitpoints");
-      chips.push(chip(`${hs ? icon(hs) : '<i class="fa fa-heart text-danger"></i> '}<b>${num(hp)}</b>`, "", "Hitpoints"));
-    }
-    if (m.isBoss) chips.push(chip('<i class="fa fa-skull"></i> Boss', "warn"));
-    return (
-      `<div class="mst-step"><div class="mst-title" style="font-size:18px">` +
-      (typeof m.media === "string" ? `<img src="${esc(m.media)}" style="width:56px;height:56px;object-fit:contain;display:block;margin:0 auto 4px">` : "") +
-      `<b>${esc(nm(m))}</b>${kills ? ` &times;${num(kills)}` : ""}</div>` +
-      `<div class="mst-chips">${chips.join("")}</div></div>` +
-      combatSection(m) + gearSection() +
-      `<div class="mst-sec">Location:</div>` +
-      (places.length
-        ? places.slice(0, 8).join("") + (places.length > 8 ? `<div class="mst-place">+${places.length - 8} more</div>` : "")
-        : `<div class="mst-place">Not found in any area list (may be event or special content)</div>`)
-    );
-  };
-
-  const heading = (t) => `<h5 class="font-w600 text-warning mt-3 mb-1">${t}</h5>`;
   // onQueue(top) is called with top=true for "Add to top", false for "Add to queue"
   const buyFromShop = (id, n) => {
     try {
@@ -767,15 +661,6 @@ export function setup(ctx) {
             if (pop) pop.innerHTML = bodyFn();
             return;
           }
-          const b = ev.target.closest?.("[data-mst-set]");
-          if (!b) return;
-          ev.preventDefault();
-          ev.stopPropagation();
-          switchSet(Number(b.dataset.mstSet));
-          const box = popup.querySelector(".mst-sets");
-          if (box) box.innerHTML = setsHtml();
-          const fb = popup.querySelector(".mst-food");
-          if (fb) fb.innerHTML = foodHtml();
         });
       },
       width: 620,
@@ -981,40 +866,6 @@ export function setup(ctx) {
       out.push({ a, altIndex, rate: xpRate(skill, a) });
     }
     return out.sort((x, y) => y.rate - x.rate);
-  };
-  const fmtTime = (h) => {
-    if (!isFinite(h)) return "?";
-    const m = Math.round(h * 60);
-    return m < 60 ? `${Math.max(1, m)} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
-  };
-  const xpSection = (skill, target) => {
-    const now = skill.xp ?? 0;
-    const left = Math.max(0, target - now);
-    let html = `<div class="mst-step"><div class="mst-title">${icon(skill)}<b>${esc(nm(skill))}</b></div><div class="mst-chips">` +
-      chip(`${num(Math.floor(now))} / ${num(target)} XP`) +
-      (left > 0 ? chip(`${num(Math.ceil(left))} to go`) : chip('<i class="fa fa-check"></i> Done', "ok")) + `</div></div>`;
-    if (left <= 0) return html;
-    const ready = xpCandidates(skill);
-    const all = ready.length ? ready : xpCandidates(skill, true);
-    if (!all.length) return html + `<div class="mst-place">Nothing found that you can train with your current levels and materials.</div>`;
-    const best = all[0];
-    html += `<div class="mst-step"><div class="mst-stepno">Fastest method right now</div>` +
-      `<div class="mst-title">${icon(best.a.product ?? best.a.log)}<b>${esc(nm(best.a))}</b></div>` +
-      `<div class="mst-chips">${chip(`Level ${best.a.level ?? 1}`)}${chip(`${num(Math.round(best.rate))} XP/hour`)}${chip(`About ${fmtTime(left / best.rate)}`, "ok", "Base XP only, ignoring mastery and other bonuses")}</div>` +
-      `</div>`;
-    if (!ready.length) {
-      const mb = xpMaterialBatch({ id: "preview", skillId: skill.id, targetXp: target });
-      if (mb.ok) {
-        const steps = mb.entries.filter((x) => x.kind !== "manual").map((x) => chip(`${esc(x.label)} &times;${num(x.qty)}`)).join("");
-        html += `<div class="mst-step"><div class="mst-stepno">First, get the materials</div><div class="mst-chips">${steps}</div>` +
-          `<div class="mst-note">${esc(mb.note ?? "")}. You don't have them in your bank, so the queue gathers and makes them first, then trains.</div></div>`;
-      } else html += `<div class="mst-chips">${chip(esc(mb.reason), "warn")}</div>`;
-    }
-    if (all.length > 1) {
-      html += `<div class="mst-sec">Next best</div><div class="mst-chips">` + all.slice(1, 4).map((c) => chip(`${esc(nm(c.a))} &middot; ${num(Math.round(c.rate))}/h`)).join("") + `</div>`;
-    }
-    html += `<div class="mst-note">Queued, it keeps picking the best method as you level up, until you reach ${num(target)} XP.</div>`;
-    return html;
   };
   const startBest = (e) => {
     const skill = skillById(e.skillId);
@@ -1449,7 +1300,6 @@ export function setup(ctx) {
     const acts = n / Math.max(1, g.a.baseQuantity ?? 1);
     return { ms: acts * intervalMs(g.skill, g.a), xp: g.skill.id === skillId ? acts * (g.a.baseExperience ?? 0) : 0 };
   };
-  const acquireMs = (item, n, lv) => acquire(item, n, lv, null).ms;
   // the same step the queue would really run for this product (first crafter / first gatherer)
   const stepFor = (a) => {
     buildIndex();
@@ -1926,7 +1776,10 @@ export function setup(ctx) {
       `<div class="mst-note">${all ? "Adding it again does nothing." : "Those steps will be skipped, the rest are added."}</div></div>`;
   };
   const tellPlayer = (msg) => {
-    try { notifyPlayer(game.township ?? game.attack, msg, "info"); } catch (e) { console.log("[Skill Trainer]", msg); }
+    // shown with the icon of the skill picked in the Train window, or the one the queue is on
+    const e = Queue.items.find((x) => x.status !== "done" && x.skillId);
+    const sk = skillById(TS.skillId) ?? (e && skillById(e.skillId)) ?? list(game.skills)[0];
+    try { notifyPlayer(sk, msg, "info"); } catch (err) { console.log("[Skill Trainer]", msg); }
   };
   const addUnique = (entries, top) => {
     const seen = queuedKeys();
@@ -1956,14 +1809,10 @@ export function setup(ctx) {
       .mst-chip.ok{background:rgba(48,199,141,.25);color:#2fb67a}
       .mst-chip.warn{background:rgba(229,174,103,.25);color:#c98a2b}
       .mst-chip.lbl{background:transparent;padding-left:0;opacity:.85}
-      .mst-sec{font-weight:600;margin:12px 0 4px;font-size:14px;opacity:.85}
       .mst-row{margin:8px 0}
       .mst-rowlbl{font-size:12px;font-weight:600;opacity:.7}
       .mst-chip>span{display:inline;line-height:20px}
       .mst-chip small{opacity:.8;font-size:.8em}
-      .mst-sets .btn{margin:0 2px}
-      .mst-place{margin:3px 0;font-size:13px}
-      .mst-place img{width:18px;height:18px;margin-right:4px;vertical-align:middle}
       .mst-note{margin-top:8px;font-size:12px;opacity:.7}
       .mst-form{display:grid;grid-template-columns:120px 1fr;gap:6px 10px;align-items:center;text-align:left;margin:0 0 10px}
       .mst-form label{margin:0;font-size:13px;opacity:.85}
@@ -1989,9 +1838,9 @@ export function setup(ctx) {
       // internals exposed for the test suite in tests/
       _dev: {
         itemMissing, areaMissing, missingHtml, reqText, buildRows, toEntries, itemSection, sourceHtml, buyHtml, buyFromShop, wikiUrl,
-        monsterSection, foodHtml, setsHtml, entryKey, addUnique, dupHtml, tellPlayer, xpCandidates, xpSection, estimateMs,
+        entryKey, addUnique, dupHtml, tellPlayer, xpCandidates, estimateMs,
         startAction, startEntry, areaFor, obtainable, fire, openTrain, trainBuild, trainQueue, TS,
-        succ, bestDetour, xpMaterialBatch, restockCraft, trainPlan, trainCands, acquireMs, nextBatch, trainEstimate, fmtDur, Astro, Farm, farmSkills, farmFights, farmPlan, fightSafety, monsterMaxHit, dropPerKill, isFarmItem, farmHtml, astroCons, astroOptions, bestCon, astroHtml, isAstroItem,
+        succ, bestDetour, xpMaterialBatch, restockCraft, trainPlan, trainCands, nextBatch, trainEstimate, fmtDur, Astro, Farm, farmSkills, farmFights, farmPlan, fightSafety, monsterMaxHit, dropPerKill, isFarmItem, farmHtml, astroCons, astroOptions, bestCon, astroHtml, isAstroItem,
       },
     };
     LOG("installed", VERSION);

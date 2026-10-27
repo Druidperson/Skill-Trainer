@@ -387,12 +387,6 @@
       ok(D().xpCandidates(s, true).length >= c.length, `${s.id}: ignoring materials can't give fewer`);
     }
   });
-  test(X, "XP task popup names the fastest method", () => {
-    const sk = skill("Woodcutting");
-    const h = D().xpSection(sk, sk.xp + 5000);
-    has(h, "Fastest method");
-    has(h, "XP/hour");
-  });
 
   // =====================================================================================
   const T = "Train a skill";
@@ -573,11 +567,6 @@
     const last = r.entries[r.entries.length - 1];
     eq(last.untilXp, target);
     ok(r.entries.some((x) => x.kind === "gather"), "should gather ore first");
-  }));
-  test(XG, "the popup says what it will gather first", () => sandbox(async () => {
-    bankStub(() => 0);
-    const sk = skill("Firemaking");
-    has(D().xpSection(sk, Math.floor(sk.xp ?? 0) + 3000).replace(/<[^>]+>/g, " "), "get the materials");
   }));
   test(XG, "the runner adds the gathering above the XP step instead of stopping", () => sandbox(async () => {
     liveOk();
