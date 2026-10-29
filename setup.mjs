@@ -50,8 +50,9 @@ export function setup(ctx) {
   // ---------- skills and their methods ----------
   // The skills the queue can run on its own. Anything else a recipe needs (herbs, feathers, monster drops) becomes a step the
   // player does themselves, unless the bank already holds enough of it.
+  const COMBAT = new Set(["Attack", "Strength", "Defence", "Hitpoints", "Ranged", "Magic", "Prayer", "Slayer"].map((s) => "melvorD:" + s));
   const TRAINABLE = new Set(["Woodcutting", "Mining", "Fishing", "Cooking", "Smithing", "Fletching", "Crafting", "Runecrafting", "Herblore",
-    "Firemaking", "Thieving", "Summoning", "Astrology", "Magic"].map((s) => "melvorD:" + s).concat("melvorItA:Harvesting"));
+    "Firemaking", "Thieving", "Summoning", "Astrology"].map((s) => "melvorD:" + s).concat("melvorItA:Harvesting", ...COMBAT));
   const isTrainable = (s) => !!s && TRAINABLE.has(s.id);
   const MAGIC = "melvorD:Magic", MELVOR = "melvorD:Melvor";
   // actions from another realm only count once that realm is unlocked and they give normal XP
@@ -63,19 +64,24 @@ export function setup(ctx) {
   const baseCosts = (a) => (Array.isArray(a.itemCosts) ? a.itemCosts : []);
   const NO_COSTS = [{ costs: [], mult: 1 }];
   // a hit the player takes while away is safe when auto eat starts above the biggest hit and there is food to eat
-  const hitSafety = (maxHit, realm) => {
+  const NM = () => (typeof numberMultiplier === "number" ? numberMultiplier : 10);
+  const player = () => game.combat?.player;
+  const resistance = () => Number(player()?.stats.getResistance?.(game.normalDamage)) || 0;
+  // a hit you take while away is safe when auto eat starts above the biggest hit and there is food to eat.
+  // A few pieces of food stay in reserve, so the step stops before the last one is gone.
+  const takeSafety = (max) => {
     try {
-      const pl = game.combat.player, slot = pl.food.slots[pl.food.selectedSlot], hp = pl.stats.maxHitpoints, eat = Number(pl.autoEatThreshold) || 0;
-      const resist = !realm || realm.id === MELVOR ? Number(pl.stats.getResistance?.(game.normalDamage)) || 0 : 0;
-      const max = Math.floor((Number(maxHit) || 0) * (typeof numberMultiplier === "number" ? numberMultiplier : 10) * (1 - resist / 100));
-      if (max <= 0) return { ok: true };
+      const pl = player(), slot = pl.food.slots[pl.food.selectedSlot], hp = pl.stats.maxHitpoints, eat = Number(pl.autoEatThreshold) || 0;
+      if (!(max > 0)) return { ok: true };
       if (max * 2 >= hp) return { ok: false, why: `it can hit for ${num(max)} against your ${num(hp)} HP` };
       if (!slot?.item || !(slot.quantity > 0) || slot.item.id === "melvorD:Empty_Food") return { ok: false, why: "you have no food equipped" };
+      if (slot.quantity < 3) return { ok: false, why: "you're almost out of food" };
       if (eat <= 0) return { ok: false, why: "auto eat is off, so nothing eats your food while the queue runs" };
       if (eat < max) return { ok: false, why: `auto eat starts at ${num(Math.round(eat))} HP but it can hit for ${num(max)}` };
       return { ok: true };
     } catch (e) { return { ok: false, why: "your combat stats couldn't be read" }; }
   };
+  const hitSafety = (maxHit, realm) => takeSafety(Math.floor((Number(maxHit) || 0) * NM() * (1 - (!realm || realm.id === MELVOR ? resistance() : 0) / 100)));
   // A method is one way to train: what an attempt costs (options, the first is used), what it makes (product, qty), how long it
   // takes (ms), the XP it gives, the share of attempts that work (succ) and how to start it. Most come straight from an action.
   const method = (skill, a, over = {}) => Object.defineProperties({
@@ -123,10 +129,140 @@ export function setup(ctx) {
       start: (e) => { s.selectRecipeOnClick(a); s.selectNonShardCostOnClick?.(e.altIndex ?? 0); if (!s.isActive) s.createButtonOnClick(); },
     }),
   };
+  // ---------- combat ----------
+  // A fight trains the skill your attack style gives XP in: 4 XP per point of damage (split on Longrange and Defensive), and
+  // 1.33 Hitpoints XP on top. Prayer XP comes from an active prayer, Slayer XP from Slayer areas (half the monster's HP) and
+  // your Slayer task (its full HP). Only fights that are safe while you're away are used, with the gear you have on.
+  const PRAYER = "melvorD:Prayer", SLAYER = "melvorD:Slayer", HITPOINTS = "melvorD:Hitpoints";
+  const STYLES = { "melvorD:Attack": { melee: "Stab" }, "melvorD:Strength": { melee: "Slash" }, "melvorD:Defence": { melee: "Block", ranged: "Longrange", magic: "Defensive" },
+    "melvorD:Ranged": { ranged: "Accurate" }, "melvorD:Magic": { magic: "Magic" } };
+  const WEAPON = { "melvorD:Attack": "melee", "melvorD:Strength": "melee", "melvorD:Ranged": "ranged", "melvorD:Magic": "magic" };
+  const RESPAWN_MS = 3000;
+  const mstat = (m, key) => (m.equipmentStats ?? []).find((x) => x.key === key && (key !== "resistance" || !x.damageType || x.damageType === game.normalDamage))?.value ?? 0;
+  // the style that trains this skill with the weapon you have on (null if that weapon can't); your own style for the rest.
+  // A ranged or magic style that already gives full XP in the skill (Rapid, say) is kept.
+  const styleFor = (skill) => {
+    const pl = player(), type = pl.attackType, cur = pl.attackStyles[type], want = STYLES[skill.id];
+    if (!want) return cur;
+    if (!want[type]) return null;
+    if (skill.id !== "melvorD:Defence" && cur?.experienceGain?.some((g) => g.skill === skill && g.ratio >= 4)) return cur;
+    return game.attackStyles.getObjectByID("melvorD:" + want[type]) ?? null;
+  };
+  // the prayer that gives the most Prayer XP that you can use
+  const bestPrayer = () => list(game.prayers).filter((p) => !p.isAbyssal && !p.isUnholy && p.pointsPerPlayer > 0 && lvl(p) <= (game.prayer?.level ?? 1))
+    .sort((a, b) => b.pointsPerPlayer - a.pointsPerPlayer)[0] ?? null;
+  const onTask = (m) => { const t = game.combat.slayerTask; return t?.monster === m && t.killsLeft > 0; };
+  // a monster's biggest normal hit before the combat triangle and your damage reduction (null if it can't be worked out)
+  const monsterHit = (m, type) => {
+    const lv = m.levels ?? {}, sp = m.selectedSpell;
+    if (type === "melee") return Character.calculateStandardMaxHit(lv.Strength ?? 1, mstat(m, "meleeStrengthBonus"));
+    if (type === "ranged") return Character.calculateStandardMaxHit(lv.Ranged ?? 1, mstat(m, "rangedStrengthBonus"));
+    if (!sp) return null;
+    return sp.spellbook?.allowDamageModifiers === false ? Math.round(NM() * sp.maxHit) : Math.floor(NM() * sp.maxHit * (1 + mstat(m, "magicDamageBonus") / 100) * (1 + ((lv.Magic ?? 1) + 1) / 200));
+  };
+  // the hardest single hit you can take from a monster: special attacks included, and the combat triangle and your damage
+  // reduction counted the way that is worst for you. Specials based on anything else can't be worked out, so they count as unsafe.
+  const maxTaken = (m) => {
+    const pt = player().attackType, tri = game.combat.combatTriangle, dm = tri?.damageModifier ?? {}, rm = tri?.reductionModifier ?? {};
+    let worst = 0;
+    for (const t of m.attackType === "random" ? ["melee", "ranged", "magic"] : [m.attackType]) {
+      const base = monsterHit(m, t);
+      if (base === null) return null;
+      let hit = base;
+      for (const sp of m.specialAttacks ?? []) for (const d of sp.attack?.damage ?? []) {
+        if (d.maxRoll === "MaxHit" && (d.character ?? "Attacker") === "Attacker") hit = Math.max(hit, (base * (d.maxPercent ?? 100)) / 100);
+        else if (d.maxRoll === "Fixed") hit = Math.max(hit, (d.maxPercent ?? 0) * NM());
+        else return null;
+      }
+      const tf = Math.max(dm[t]?.[pt] ?? 1, dm[pt]?.[t] ?? 1), rf = Math.min(1, rm[pt]?.[t] ?? 1, rm[t]?.[pt] ?? 1);
+      worst = Math.max(worst, hit * tf * (1 - (resistance() * rf) / 100));
+    }
+    return Math.ceil(worst);
+  };
+  // how many attacks a kill takes, and how long it takes with the time until the next monster appears
+  const killStats = (m) => {
+    const st = player().stats, pt = player().attackType, lv = m.levels ?? {}, tri = game.combat.combatTriangle?.damageModifier ?? {};
+    const level = pt === "magic" ? Math.floor((lv.Defence ?? 1) * 0.3 + (lv.Magic ?? 1) * 0.7) : lv.Defence ?? 1;
+    const ev = Character.calculateStandardStat({ effectiveLevel: level, bonus: mstat(m, `${pt}DefenceBonus`) }), acc = st.accuracy;
+    const hit = !(acc > 0) ? 0 : acc < ev ? (0.5 * acc) / ev : 1 - (0.5 * ev) / acc;
+    const dmg = hit * ((st.minHit + st.maxHit) / 2) * (tri[pt]?.[m.attackType] ?? 1) * (1 - mstat(m, "resistance") / 100);
+    const attacks = dmg > 0 ? Math.ceil(((lv.Hitpoints ?? 1) * NM()) / dmg) : Infinity;
+    return { attacks, ms: attacks * st.attackInterval + RESPAWN_MS };
+  };
+  const xpPerKill = (skill, m, area) => {
+    const hp = m.levels?.Hitpoints ?? 1;
+    if (skill.id === HITPOINTS) return hp * 1.33;
+    if (skill.id === SLAYER) return (game.slayerAreas.allObjects.includes(area) ? hp / 2 : 0) + (onTask(m) ? hp : 0);
+    if (skill.id === PRAYER) return (hp * (bestPrayer()?.pointsPerPlayer ?? 0)) / 3;
+    return hp * (styleFor(skill)?.experienceGain?.find((g) => g.skill === skill)?.ratio ?? 0);
+  };
+  // why this fight can't be used right now (null when it can)
+  const fightNeed = (skill, m, area) => {
+    const pl = player(), type = pl.attackType;
+    if (WEAPON[skill.id] && WEAPON[skill.id] !== type) return `needs a ${WEAPON[skill.id]} weapon equipped (yours fights with ${type})`;
+    if (!game.checkRequirements(area.entryRequirements ?? [])) return `${nm(area)} has requirements you don't meet yet`;
+    if (type === "magic" && !(pl.spellSelection.attack && pl.canUseCombatSpell(pl.spellSelection.attack))) return "needs a combat spell you can cast selected in Combat";
+    if (type === "ranged" && !(pl.equipment.equippedItems["melvorD:Quiver"]?.quantity > 0)) return "needs ammo in your quiver";
+    if (skill.id === PRAYER && !bestPrayer()) return "needs a prayer you can use";
+    if (skill.id === PRAYER && !(pl.prayerPoints > 0)) return "needs prayer points (bury some bones first)";
+    return null;
+  };
+  // checked every second while a fight runs: runes, ammo and prayer points can run out
+  const fightCheck = (skill) => {
+    const pl = player(), sp = pl.spellSelection.attack;
+    if (skill.id === PRAYER && !(pl.prayerPoints > 0)) return { why: "out of prayer points (bury some bones for more)" };
+    if (pl.attackType === "ranged" && !(pl.equipment.equippedItems["melvorD:Quiver"]?.quantity > 0)) return { why: "out of ammo" };
+    if (pl.attackType === "magic" && sp && !pl.getRuneCosts(sp).every((k) => owned(k.item) >= k.quantity)) return { why: "out of runes", noMaterials: true };
+    return null;
+  };
+  // The queue sets the attack style (and the prayer, for Prayer) for a fight and puts yours back when the step ends.
+  let savedCombat = null;
+  const restoreCombat = () => {
+    const s = savedCombat, pl = player();
+    savedCombat = null;
+    if (!s || !pl) return;
+    try {
+      if (pl.attackStyles[s.type] !== s.style) pl.setAttackStyle(s.type, s.style);
+      for (const p of [...pl.activePrayers]) if (!s.prayers.includes(p)) pl.togglePrayer(p);
+      for (const p of s.prayers) if (!pl.activePrayers.has(p)) pl.togglePrayer(p);
+    } catch (e) { console.warn(TAG, "restoring combat settings", e); }
+  };
+  const fighting = (m) => game.activeAction === game.combat && game.combat.selectedMonster === m;
+  const startFight = (skill, m, area) => {
+    const pl = player(), style = styleFor(skill), pr = skill.id === PRAYER && bestPrayer();
+    if (game.activeAction && !fighting(m)) game.stopActiveAction();
+    savedCombat ??= { type: pl.attackType, style: pl.attackStyles[pl.attackType], prayers: [...pl.activePrayers] };
+    if (style && pl.attackStyles[pl.attackType] !== style) pl.setAttackStyle(pl.attackType, style);
+    if (pr && !pl.activePrayers.has(pr)) pl.togglePrayer(pr);
+    if (!fighting(m)) game.combat.selectMonster(m, area);
+  };
+  // the numbers behind each fight are worked out once a second, since the planner asks for them many times
+  const fightMemo = { t: 0, m: new Map() };
+  const fightEval = (key, fn) => {
+    const t = Math.floor(Date.now() / 1000);
+    if (t !== fightMemo.t) Object.assign(fightMemo, { t, m: new Map() });
+    if (!fightMemo.m.has(key)) fightMemo.m.set(key, fn());
+    return fightMemo.m.get(key);
+  };
+  const fightMethods = (skill) => [...list(game.combatAreas), ...list(game.slayerAreas)].filter(realmOk).flatMap((area) => (area.monsters ?? []).filter((m) => realmOk(m) && m.levels).map((m) => {
+    const ev = () => fightEval(`${skill.id}|${area.id}|${m.id}`, () => ({ ...killStats(m), xp: xpPerKill(skill, m, area), hit: maxTaken(m) }));
+    return method(skill, m, {
+      id: `fight:${area.id}:${m.id}`, name: `Fight ${nm(m)}${game.slayerAreas.allObjects.includes(area) ? ` (${nm(area)})` : ""}`, media: m.media, product: null, level: 1, succ: 1,
+      actor: game.combat, noMastery: true, cap: () => (skill.id === SLAYER && !game.slayerAreas.allObjects.includes(area) ? game.combat.slayerTask.killsLeft : Infinity),
+      get xp() { return ev().xp; }, get ms() { return ev().ms; },
+      // a combat spell uses runes on every cast
+      get options() { const pl = player(), sp = pl.spellSelection.attack; return pl.attackType === "magic" && sp ? [{ costs: pl.getRuneCosts(sp).map((k) => ({ item: k.item, quantity: k.quantity * ev().attacks })), mult: 1 }] : NO_COSTS; },
+      need: () => fightNeed(skill, m, area), check: () => fightCheck(skill), active: () => fighting(m), start: () => startFight(skill, m, area),
+      safe: () => (ev().hit === null ? { ok: false, why: `${nm(m)} has special attacks whose damage can't be worked out` } : takeSafety(ev().hit)),
+    });
+  }));
   const methodCache = new Map();
   const methodsOf = (skill) => {
     if (!skill) return [];
-    if (!methodCache.has(skill.id)) methodCache.set(skill.id, skill.id === MAGIC ? magicMethods(skill) : list(skill.actions).filter(realmOk).map((a) => (SKILLS[skill.id] ?? method)(skill, a)));
+    if (!methodCache.has(skill.id)) {
+      const own = skill.id === MAGIC ? magicMethods(skill) : list(skill.actions).filter(realmOk).map((a) => (SKILLS[skill.id] ?? method)(skill, a));
+      methodCache.set(skill.id, COMBAT.has(skill.id) ? [...own, ...fightMethods(skill)] : own);
+    }
     return methodCache.get(skill.id);
   };
   const methodById = (skill, id) => methodsOf(skill).find((m) => m.id === id);
@@ -289,13 +425,15 @@ export function setup(ctx) {
     if (m.level > skill.level) return fail(`needs ${nm(skill)} level ${m.level}`);
     if (m.need?.()) return fail(m.need());
     if (safety && !safety.ok) return fail(`not safe while you're away: ${safety.why}`);
+    const chk = m.check?.();
+    if (chk) return fail(chk.why, { noMaterials: !!chk.noMaterials });
     try {
-      if (game.activeAction && game.activeAction !== skill) game.stopActiveAction();
-      if (skill.isActive && skill.stop() === false) return fail("couldn't stop the current activity");
+      if (game.activeAction && game.activeAction !== (m.actor ?? skill)) game.stopActiveAction();
+      if (!m.actor && skill.isActive && skill.stop() === false) return fail("couldn't stop the current activity");
       const r = m.start(e);
       if (r) return r;
     } catch (err) { return fail("error: " + err.message); }
-    if (skill.isActive) return { ok: true };
+    if (m.active ? m.active() : skill.isActive) return { ok: true };
     const costly = (m.options[e.altIndex ?? 0] ?? m.options[0]).costs.length > 0 && e.kind !== "gather";
     return fail(costly ? "not enough materials (or level too low)" : "the game wouldn't start it", { noMaterials: costly && m.level <= skill.level });
   };
@@ -325,7 +463,7 @@ export function setup(ctx) {
   // ---------- runner: takes entries from the top of the list, one at a time ----------
   const Runner = {
     state: "idle", // idle | running | paused
-    message: "", activeId: null, activeSkillId: null,
+    message: "", activeId: null, activeActor: null,
     focusId: null, // "Do this first": run this entry now without moving it in the list
     elapsed: 0, lastTick: null, // running time since the queue was started (for the progress bar)
     setState(s, msg = "") { this.state = s; this.message = msg; Panel.render(); },
@@ -348,8 +486,10 @@ export function setup(ctx) {
     // what a step counts: XP for skill steps, otherwise how many of its item you own
     value: (e) => (e.kind === "skill" ? Math.floor(skillById(e.skillId)?.xp ?? 0) : owned(itemById(e.itemId))),
     gained(e) { return e.kind === "train" ? Math.floor(skillById(e.skillId)?.xp ?? 0) : e.startQty === undefined ? 0 : Math.max(0, this.value(e) - e.startQty); },
-    halt(skillId = this.activeSkillId) { const s = skillId && skillById(skillId); try { if (s && game.activeAction === s) game.stopActiveAction(); } catch (e) { console.warn(TAG, e); } },
-    release() { this.activeId = null; this.activeSkillId = null; },
+    // what runs a step in the game: the skill, or combat for a fight
+    actorOf: (e) => methodById(skillById(e.skillId), e.actionId)?.actor ?? skillById(e.skillId) ?? null,
+    halt(actor = this.activeActor) { try { if (actor && game.activeAction === actor) game.stopActiveAction(); } catch (e) { console.warn(TAG, e); } restoreCombat(); },
+    release() { this.activeId = null; this.activeActor = null; },
     leave() {
       if (this.activeId === null) return;
       const prev = Queue.items.find((e) => e.id === this.activeId);
@@ -364,7 +504,8 @@ export function setup(ctx) {
       Object.assign(this, { state: "running", message: "" }).step();
       Panel.render();
     },
-    pause(msg = "Paused") { if (this.state === "running") { this.halt(); this.setState("paused", msg); } },
+    // keep = you started something yourself: leave it running, just put your combat settings back
+    pause(msg = "Paused", keep = false) { if (this.state === "running") { if (keep) restoreCombat(); else this.halt(); this.setState("paused", msg); } },
     stop() {
       this.halt();
       const cur = Queue.items.find((e) => e.id === this.activeId);
@@ -392,7 +533,7 @@ export function setup(ctx) {
         entry.sold = `Sold ${num(extra)}${entry.sellAll ? "" : " extra"} for ${num(price)} ${nm(item.sellsFor.currency)}`;
       } catch (e) { console.warn(TAG, "auto-sell", e); }
     },
-    finish(entry) { this.sellExtra(entry); entry.status = "done"; delete entry.reason; this.halt(entry.skillId); this.release(); Queue.save(); },
+    finish(entry) { this.sellExtra(entry); entry.status = "done"; delete entry.reason; this.halt(this.actorOf(entry)); this.release(); Queue.save(); },
     wait(msg) { this.message = msg; Panel.render(); },
     step() {
       if (this.state !== "running") { this.lastTick = null; return; }
@@ -421,7 +562,7 @@ export function setup(ctx) {
         // a different entry is now on top (we just started, or something was added above): switch to it
         if (this.activeId !== cur.id) {
           this.leave();
-          Object.assign(this, { activeId: cur.id, activeSkillId: cur.skillId ?? null });
+          Object.assign(this, { activeId: cur.id, activeActor: this.actorOf(cur) });
           cur.status = "active"; delete cur.reason;
           if (cur.kind !== "manual" && cur.startQty === undefined) cur.startQty = this.value(cur);
           Queue.save();
@@ -444,14 +585,16 @@ export function setup(ctx) {
         if (us && (us.level >= cur.untilLevel || (cur.untilXp && (us.xp ?? 0) >= cur.untilXp))) { this.finish(cur); continue; }
         if (got - (cur.startQty ?? 0) >= cur.qty) { this.finish(cur); continue; }
 
-        const skill = skillById(cur.skillId), safety = methodById(skill, cur.actionId)?.safe?.();
-        // the food can run out while thieving: stop before it isn't safe any more
+        const skill = skillById(cur.skillId), m = methodById(skill, cur.actionId), safety = m?.safe?.(), chk = m?.check?.(), actor = m?.actor ?? skill;
+        // food, runes, ammo and prayer points can run out mid-step: stop before it isn't safe any more
         if (safety && !safety.ok) return this.block(cur, `not safe while you're away: ${safety.why}`);
-        if (skill && skill.isActive && game.activeAction === skill) return Panel.render();
-        if (game.activeAction && game.activeAction !== skill) return this.pause("Paused: something else started running.");
+        if (chk && !chk.noMaterials) return this.block(cur, chk.why);
+        if (!chk && (m?.active ? m.active() : skill && skill.isActive && game.activeAction === skill)) return Panel.render();
+        // something else started, or you picked another fight yourself
+        if (game.activeAction && (game.activeAction !== actor || (m?.active && !m.active()))) return this.pause("Paused: something else started running.", true);
 
         // nothing is running and the target isn't reached: the game stopped it (materials, etc.) so try again once
-        const r = startAction(cur);
+        const r = chk ? fail(chk.why, { noMaterials: true }) : startAction(cur);
         if (r.ok) return Panel.render();
         if (r.transient) return this.wait(r.reason);
         const made = this.gained(cur), of = `(${num(made)} of ${num(cur.qty)} done)`;
@@ -523,15 +666,24 @@ export function setup(ctx) {
       let ms = m.ms, xpPer = m.xp * m.succ, mast = 0;
       if (st.craft) for (const k of opt.costs) { const r = acquire(k.item, k.quantity, lv, skill.id); ms += r.ms; xpPer += r.xp; }
       if (!isFinite(ms) || ms <= 0) continue;
-      if (mastery() && m.a.hasMastery !== false) {
+      if (mastery() && !m.noMastery && m.a.hasMastery !== false) {
         try { if (skill.getMasteryLevel(m.a) < 99) mast = Number(skill.getMasteryXPToAddForAction(m.a, m.ms)) || 0; } catch (e) { /* no mastery */ }
       }
       out.push({ a: m, st, opt, per: perAttempt(m, opt), ms, xpPer, mast, rate: (xpPer / ms) * 3600000, score: ((xpPer + mast) / ms) * 3600000 });
     }
     return out.sort((x, y) => y.score - x.score);
   };
-  // why nothing at this level can be trained, when it's about safety (Thieving with no food or auto eat)
-  const unsafeWhy = (skill) => methodsOf(skill).map((m) => m.level <= skill.level && m.safe?.()).find((r) => r && !r.ok)?.why;
+  // why nothing at this level can be trained, when it comes down to gear, requirements or safety (no food, say)
+  const blockedWhy = (skill) => {
+    for (const m of methodsOf(skill)) {
+      if (m.level > skill.level) continue;
+      const need = m.need?.();
+      if (need) return need;
+      const safe = m.xp > 0 && m.safe?.();
+      if (safe && !safe.ok) return `it isn't safe while you're away (${safe.why})`;
+    }
+    return null;
+  };
   const trainPlan = (skill, target, forcedId, fromLevel = skill.level, fromXp = skill.xp ?? 0, seed = null) => {
     const sim = new Map(seed ?? []), batches = [];
     let L = fromLevel, cur = null, blocked = null;
@@ -559,7 +711,7 @@ export function setup(ctx) {
   const detourMemo = new Map(), estMemo = new Map();
   const GATHER_SKILLS = ["melvorD:Mining", "melvorD:Woodcutting", "melvorD:Fishing"];
   const bestDetour = (skill, target, fromLevel = skill.level, fromXp = skill.xp ?? 0) => {
-    if (!isTrainable(skill) || target - fromLevel < 3) return null;
+    if (!isTrainable(skill) || (COMBAT.has(skill.id) && skill.id !== MAGIC) || target - fromLevel < 3) return null;
     const key = `${skill.id}|${fromLevel}|${target}|${GATHER_SKILLS.map((id) => skillById(id)?.level ?? 0)}|${mastery()}`;
     return memo(detourMemo, key, 100, () => {
       let best = null;
@@ -596,12 +748,12 @@ export function setup(ctx) {
     };
     const b = trainPlan(skill, e.targetLevel, e.forced).batches[0];
     if (!b) {
-      const fm = e.forced && methodById(skill, e.forced), why = unsafeWhy(skill);
-      return fail(fm ? `${fm.name} can't be trained by the queue at level ${skill.level}` : why ? `nothing at ${nm(skill)} level ${skill.level} is safe while you're away: ${why}`
+      const fm = e.forced && methodById(skill, e.forced), why = blockedWhy(skill);
+      return fail(fm ? `${fm.name} can't be trained by the queue at level ${skill.level}` : why ? `nothing at ${nm(skill)} level ${skill.level} can be trained right now: ${why}`
         : `nothing at ${nm(skill)} level ${skill.level} can be trained by the queue on its own (it may need shop items or monster drops)`);
     }
     const m = b.c.a, goalXp = Math.min(xpAt(b.to), e.targetXp ?? Infinity), note = `${m.name} until level ${b.to} (about ${num(Math.round(b.c.rate))} XP/h)`;
-    const actions = Math.max(1, Math.min(stockCap(b.c.opt.costs), Math.ceil((goalXp - (skill.xp ?? 0)) / b.c.xpPer)));
+    const actions = Math.max(1, Math.min(stockCap(b.c.opt.costs), m.cap?.() ?? Infinity, Math.ceil((goalXp - (skill.xp ?? 0)) / b.c.xpPer)));
     // a method that makes nothing (or isn't the usual way to make its product) runs as an XP step after its materials
     if (b.c.st.own) {
       const entries = materialSteps(b.c.opt.costs, actions, e.id), xpPer = m.xp * m.succ;
@@ -685,7 +837,7 @@ export function setup(ctx) {
     if (!(L > sk.level) || L > cap) return nothing(sk.level >= cap ? `${nm(sk)} is already at its highest level.` : `Pick a target level between ${sk.level + 1} and ${cap}.`);
     const plan = trainPlan(sk, L, TS.forced || null);
     if (!plan.batches.length) {
-      const why = unsafeWhy(sk), msg = why ? `Nothing here is safe for the queue to train while you're away: ${why}.` : "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
+      const why = blockedWhy(sk), msg = why ? `Nothing here can be trained right now: ${why}.` : "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
       return nothing(msg, step(chips(chip(`${warnIcon}${esc(msg)}`, "warn"))));
     }
     const entries = [{ kind: "train", skillId: sk.id, targetLevel: L, targetXp: xpAt(L), qty: xpAt(L), forced: TS.forced || undefined, sellMade: TS.sell, label: `${nm(sk)}: reach level ${L}` }];
