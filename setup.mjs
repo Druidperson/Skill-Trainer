@@ -8,6 +8,7 @@ export function setup(ctx) {
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const num = (n) => Number(n).toLocaleString();
   const plural = (n, w, ws = w + "s") => `${num(n)} ${n === 1 ? w : ws}`;
+  const aOr = (w) => `${/^[aeiou]/i.test(w) ? "an" : "a"} ${w}`;
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const icon = (o) => (typeof o?.media === "string" ? `<img class="skill-icon-xs mr-1" src="${esc(o.media)}">` : "");
   const have = (item) => { try { const q = game.bank.getQty(item); return Number.isFinite(q) ? q : null; } catch (e) { return null; } };
@@ -33,6 +34,8 @@ export function setup(ctx) {
       "When on, the planner counts the mastery XP a method gives next to the skill XP, and sticks with a method longer so its mastery keeps growing. When off, it only looks at skill XP per hour."],
     autoSell: ["mst-th-autosell", true, "Automatically sell extras the queue makes",
       "When a step makes more than the task needs (like arrowtips crafted in batches), the extra is sold. It never sells anything you already owned."],
+    sideJobs: ["mst-th-sidejobs", true, "Work on other steps while crops grow",
+      "When on, a Farming step that is waiting for its crops lets a later step run in the meantime (gathering, or training that uses no materials), and goes back to the crops once they're ready."],
   };
   let section = null;
   try {
@@ -83,6 +86,16 @@ export function setup(ctx) {
       return { ok: true };
     } catch (e) { return { ok: false, why: "your combat stats couldn't be read" }; }
   };
+  // numbers the planner asks for many times (fights, the shop, your bones) are worked out once a second
+  const secMemo = { t: 0, m: new Map() };
+  const perSec = (key, fn) => {
+    const t = Math.floor(Date.now() / 1000);
+    if (t !== secMemo.t) Object.assign(secMemo, { t, m: new Map() });
+    if (!secMemo.m.has(key)) secMemo.m.set(key, fn());
+    return secMemo.m.get(key);
+  };
+  const costText = (x) => [...x.cur.map((k) => `${num(k.quantity)} ${nm(k.currency)}`), ...x.items.map((k) => `${num(k.quantity)} ${nm(k.item)}`)].join(" + ") || "free";
+  const costsOf = (c) => ({ c, items: c.getItemQuantityArray(), cur: c.getCurrencyQuantityArray() });
   const hitSafety = (maxHit, realm) => takeSafety(Math.floor((Number(maxHit) || 0) * NM() * (1 - (!realm || realm.id === MELVOR ? resistance() : 0) / 100)));
   // A method is one way to train: what an attempt costs (options, the first is used), what it makes (product, qty), how long it
   // takes (ms), the XP it gives, the share of attempts that work (succ) and how to start it. Most come straight from an action.
@@ -138,8 +151,15 @@ export function setup(ctx) {
   const openPlots = (f, r) => { let p = []; try { p = [...(f.getPlotsForCategory(r.category) ?? [])]; } catch (e) { /* use the list */ } return (p.length ? p : list(f.plots).filter((x) => x.category === r.category)).filter((x) => x.state !== 0); };
   const growMs = (f, r) => { try { return f.modifyInterval(r.baseInterval, r) || r.baseInterval; } catch (e) { return r.baseInterval; } };
   const seedCost = (f, r) => { try { return f.getRecipeSeedCost(r); } catch (e) { return r.seedCost?.quantity ?? 1; } };
-  // without compost a crop only grows about half the time, and a dead crop gives nothing
-  const cropChance = (f, r) => { try { return Math.min(1, Math.max(0.05, f.getPlotGrowthChance({ compostLevel: 0, plantedRecipe: r }) / 100)); } catch (e) { return 1; } };
+  // without compost a crop only grows about half the time, and a dead crop gives nothing. Compost you own goes on a plot
+  // before it's planted (Weird Gloop and other kinds are left for you to use).
+  const COMPOST = "melvorD:Compost";
+  const compostPer = () => { const c = itemById(COMPOST); return c?.compostValue > 0 ? Math.ceil(100 / c.compostValue) : Infinity; };
+  const cropChance = (f, r, level = owned(itemById(COMPOST)) >= compostPer() ? 100 : 0) => { try { return Math.min(1, Math.max(0.05, f.getPlotGrowthChance({ compostLevel: level, plantedRecipe: r }) / 100)); } catch (e) { return 1; } };
+  const compostPlot = (f, p) => {
+    const c = itemById(COMPOST), n = c?.compostValue > 0 ? Math.ceil((100 - (p.compostLevel ?? 0)) / c.compostValue) : 0;
+    if (n > 0 && owned(c) >= n) try { f.compostPlot(p, c, n); } catch (e) { console.warn(TAG, "compost", e); }
+  };
   const farmTick = (f, r, e) => {
     const plots = openPlots(f, r), mine = (p) => p.plantedRecipe === r, m = methodById(f, r.id);
     if (!plots.length) return { block: `you haven't unlocked any ${nm(r.category)} plots yet` };
@@ -152,14 +172,14 @@ export function setup(ctx) {
       const empty = plots.filter((p) => p.state === PLOT.empty), cost = seedCost(f, r), seeds = owned(r.seedCost.item);
       const n = Math.min(want, empty.length, Math.floor(seeds / cost)), timers = new Map();
       // the game starts one growth timer per planting time, the same way its own Plant All button does
-      for (const p of empty.slice(0, n)) { const t = f.plantPlot(p, r); if (t > 0 && p.state === PLOT.growing) timers.set(t, [...(timers.get(t) ?? []), p]); }
+      for (const p of empty.slice(0, n)) { compostPlot(f, p); const t = f.plantPlot(p, r); if (t > 0 && p.state === PLOT.growing) timers.set(t, [...(timers.get(t) ?? []), p]); }
       timers.forEach((ps, t) => f.createGrowthTimer(ps, t));
       if (n === 0 && !growing) return { block: empty.length ? `needs ${cost} ${nm(r.seedCost.item)} to plant ${nm(r)} and you have ${seeds}` : `all your ${nm(r.category)} plots are busy with other crops. Harvest or clear them` };
     }
     const now = plots.filter((p) => mine(p) && p.state === PLOT.growing);
     if (!now.length) return {};
-    const ms = Math.max(...now.map((p) => { try { return f.getPlotGrowthTime(p); } catch (err) { return 0; } }));
-    return { note: `Waiting for ${nm(r)} to grow: ${plural(now.length, "plot")} planted, ready in ${fmtDur(ms)}` };
+    const times = now.map((p) => { try { return f.getPlotGrowthTime(p); } catch (err) { return 0; } });
+    return { note: `waiting for ${nm(r)} to grow: ${plural(now.length, "plot")} planted, ready in ${fmtDur(Math.max(...times))}`, readyIn: Math.min(...times) };
   };
   SKILLS[FARMING] = (s, r) => method(s, r, {
     get options() { return [{ costs: r.seedCost?.item ? [{ item: r.seedCost.item, quantity: seedCost(s, r) }] : [], mult: 1 }]; },
@@ -171,12 +191,22 @@ export function setup(ctx) {
     need: () => (openPlots(s, r).length ? null : `needs an unlocked ${nm(r.category)} plot`),
     tick: (e) => farmTick(s, r, e), start: () => fail("Farming steps plant and harvest instead"),
   });
-  // Archaeology digs at sites that have a map with charges and tools picked. Maps come from Cartography and aren't made here.
-  SKILLS["melvorAoD:Archaeology"] = (s, site) => method(s, site, {
+  // Archaeology digs at sites that have a map with charges and tools picked. An Archaeology goal with no map offers to make
+  // one in Cartography (you confirm it), and picks the tools for you.
+  const ARCH = "melvorAoD:Archaeology";
+  SKILLS[ARCH] = (s, site) => method(s, site, {
     product: null, options: NO_COSTS, get xp() { return s.getBaseSkillXPForDigSite?.(site) ?? 0; }, get ms() { return s.getDigSiteInterval?.(site) ?? intervalMs(s, site); },
     need: () => (s.canExcavate?.(site) ? null : `needs a map for ${nm(site)} with charges, and your tools picked (maps come from Cartography)`),
     check: () => (site.selectedMap?.charges > 0 ? null : { why: `the ${nm(site)} map is out of charges` }), start: () => s.startDigging(site),
   });
+  // every tool goes on a site that has a map but no tools picked yet
+  const pickTools = (site) => { const ar = game.archaeology; if (site.selectedMap && !site.selectedTools?.length) for (const t of list(ar.tools)) try { ar.setToolAsActive(site, t); } catch (e) { /* tool not available */ } };
+  // the dig site to make a map for: found on the map, open at your level, room for another map, best XP first
+  const mapSite = () => {
+    const ar = game.archaeology, sites = list(ar?.actions).filter((x) => realmOk(x) && lvl(x) <= ar.level && x.maps.length < (x.getMaxMaps?.() ?? 1));
+    const found = sites.filter((x) => x.poi?.isDiscovered).sort((a, b) => xpRate(methodById(ar, b.id)) - xpRate(methodById(ar, a.id)));
+    return { site: found[0] ?? null, hidden: sites.length > 0 && !found.length };
+  };
   // Agility runs the course you've built; a lap gives the XP of every obstacle. The course builder below fills empty slots.
   const AGILITY = "melvorD:Agility";
   const agilityMethods = (s) => {
@@ -193,7 +223,7 @@ export function setup(ctx) {
   // For each empty slot you've unlocked: the obstacle with the most XP per second of lap time that meets its requirements, has no
   // negative bonus, costs GP you have and items you own or the queue can gather. Nothing is built until you confirm it,
   // obstacles you built are never replaced, and a slot you skip stays empty for that goal.
-  const buildCosts = (o) => { const c = game.agility.getObstacleBuildCosts(o); return { c, items: c.getItemQuantityArray(), cur: c.getCurrencyQuantityArray() }; };
+  const buildCosts = (o) => costsOf(game.agility.getObstacleBuildCosts(o));
   const agilityPicks = (skip = []) => {
     const ag = game.agility, course = ag?.activeCourse, picks = [];
     (course?.obstacleSlots ?? []).forEach((slot, i) => {
@@ -205,29 +235,29 @@ export function setup(ctx) {
     });
     return picks;
   };
-  const costText = (x) => [...x.cur.map((k) => `${num(k.quantity)} ${nm(k.currency)}`), ...x.items.map((k) => `${num(k.quantity)} ${nm(k.item)}`)].join(" + ") || "free";
-  // the queue steps for a set of picks: gather the items, then a build step each
+  // the queue steps for a set of picks: gather the items, then a build step each (it asks you first)
   const buildSteps = (picks, parent) => picks.flatMap((x) => [...(materialSteps(x.items, 1, parent) ?? []),
-    { kind: "build", skillId: AGILITY, actionId: x.o.id, slot: x.slot, qty: 1, parent, label: `Agility: build ${nm(x.o)}` }]);
-  // the confirm window; the answer is kept on the step and the queue carries on
-  const askBuild = (e, o) => {
-    const x = { o, ...buildCosts(o) }, slot = game.agility.activeCourse.obstacleSlots[o.category];
-    const mods = (o.modifiers ?? []).map((v) => { try { return v.getDescription().description; } catch (err) { return ""; } }).filter(Boolean);
-    SwalLocale.fire({
-      title: "Build an Agility obstacle?", width: 560, showCancelButton: true, confirmButtonText: "Build", cancelButtonText: "Skip",
-      html: `<div class="text-center font-size-sm mst-th-pop">` + step(`<div class="mst-title">${icon(o)}<b>${esc(nm(o))}</b></div>` +
-        chips(chip(`Slot ${o.category + 1} (Agility level ${slot?.level ?? 1})`), chip(`${num(o.baseExperience ?? 0)} XP per lap`), chip(`${num((o.baseInterval ?? 0) / 1000)} s`)) +
-        chips(chip("<b>Costs</b>", "lbl"), chip(esc(costText(x)))) + (mods.length ? chips(chip("<b>Bonuses</b>", "lbl"), ...mods.map((d) => chip(esc(d), "ok"))) : "")) +
-        note("Building can't be undone. Skip leaves this slot empty for this goal.") + `</div>`,
-    })?.then?.((r) => { e.answer = r?.isConfirmed ? "build" : r?.dismiss === "cancel" ? "skip" : undefined; e.asking = false; Queue.save(); if (e.answer) Runner.start(); });
-  };
+    { kind: "ask", what: "build", skillId: AGILITY, actionId: x.o.id, slot: x.slot, qty: 1, parent, label: `Agility: build ${nm(x.o)}` }]);
 
-  // Cartography trains here by making paper from logs. Surveying the map stays with you.
-  const cartographyMethods = (s) => list(s.paperRecipes).filter(realmOk).map((r) => method(s, r, {
+  // Cartography trains by making paper from logs, or by surveying the hexes in range of where you stand on the map
+  const surveyHex = (s) => {
+    try {
+      const map = s.activeMap;
+      return map.getHexesInRange(map.playerPosition, map.surveyRange).filter((h) => !h.isFullySurveyed && (h.cartographyLevel ?? 1) <= s.level && game.checkRequirements(h.requirements ?? []))
+        .sort((a, b) => (b.cartographyLevel ?? 0) - (a.cartographyLevel ?? 0))[0] ?? null;
+    } catch (e) { return null; }
+  };
+  const cartographyMethods = (s) => [...list(s.paperRecipes).filter(realmOk).map((r) => method(s, r, {
     get options() { return [{ costs: (r.costs?.items ?? []).filter((k) => k?.item), mult: 1 }]; },
     get ms() { return s.getPaperMakingInterval?.(r) ?? s.BASE_PAPER_MAKING_INTERVAL ?? 5000; },
     start: () => { s.selectPaperRecipeOnClick(r); if (!s.isActive) s.makePaperOnClick(); },
-  }));
+  })), method(s, { id: "cartography:survey", name: "Survey the map", media: s.media }, {
+    product: null, options: NO_COSTS, level: 1, noMastery: true,
+    get xp() { const h = surveyHex(s); return h ? Number(s.getSkillXPForHexSurveyAction?.(h)) || (h.cartographyLevel ?? 1) * 2.6 : 0; },
+    get ms() { return s.surveyInterval ?? 5000; },
+    need: () => (surveyHex(s) ? null : "there's nothing left to survey in range of where you are on the map. Move somewhere new first"),
+    start: () => { const h = surveyHex(s); if (!h) return fail("nothing left to survey nearby"); s.autoSurveyOnClick(h); },
+  })];
   const WHOLE = { [MAGIC]: (s) => magicMethods(s), "melvorD:Agility": agilityMethods, "melvorAoD:Cartography": cartographyMethods };
 
   // ---------- combat ----------
@@ -253,6 +283,20 @@ export function setup(ctx) {
   const bestPrayer = () => list(game.prayers).filter((p) => !p.isAbyssal && !p.isUnholy && p.pointsPerPlayer > 0 && lvl(p) <= (game.prayer?.level ?? 1))
     .sort((a, b) => b.pointsPerPlayer - a.pointsPerPlayer)[0] ?? null;
   const onTask = (m) => { const t = game.combat.slayerTask; return t?.monster === m && t.killsLeft > 0; };
+  // Prayer points run out: the cheapest bones in your bank (by sale price per point) are buried for more
+  const bones = () => perSec("bones", () => list(game.items).filter((it) => it.prayerPoints > 0 && owned(it) > 0 && !game.bank.items.get(it)?.locked)
+    .sort((a, b) => (a.sellsFor?.quantity ?? 0) / a.prayerPoints - (b.sellsFor?.quantity ?? 0) / b.prayerPoints)[0] ?? null);
+  const buryBones = () => {
+    const b = bones();
+    if (!b) return false;
+    try { game.bank.buryItemOnClick(b, Math.max(1, Math.ceil(100 / (Number(game.bank.getPrayerPointsPerBone?.(b)) || b.prayerPoints)))); } catch (e) { console.warn(TAG, "burying bones", e); }
+    secMemo.m.delete("bones");
+    return player().prayerPoints > 0;
+  };
+  // the weapon type an equipment set fights with, and another set that fits a skill (-1 if none)
+  const weaponOf = (set) => { const w = set?.equipment?.equippedItems?.["melvorD:Weapon"]?.item; return !w || w.id === "melvorD:Empty_Equipment" ? "melee" : w.attackType ?? "melee"; };
+  const weaponGap = (skill) => !!WEAPON[skill.id] && player()?.attackType !== WEAPON[skill.id];
+  const setFor = (skill) => { const pl = player(); return (pl.equipmentSets ?? []).findIndex((s, i) => i !== pl.selectedEquipmentSet && weaponOf(s) === WEAPON[skill.id]); };
   // a monster's biggest normal hit before the combat triangle and your damage reduction (null if it can't be worked out)
   const monsterHit = (m, type) => {
     const lv = m.levels ?? {}, sp = m.selectedSpell;
@@ -305,13 +349,13 @@ export function setup(ctx) {
     if (type === "magic" && !(pl.spellSelection.attack && pl.canUseCombatSpell(pl.spellSelection.attack))) return "needs a combat spell you can cast selected in Combat";
     if (type === "ranged" && !(pl.equipment.equippedItems["melvorD:Quiver"]?.quantity > 0)) return "needs ammo in your quiver";
     if (skill.id === PRAYER && !bestPrayer()) return "needs a prayer you can use";
-    if (skill.id === PRAYER && !(pl.prayerPoints > 0)) return "needs prayer points (bury some bones first)";
+    if (skill.id === PRAYER && !(pl.prayerPoints > 0) && !bones()) return "needs prayer points, or bones in your bank to bury";
     return null;
   };
   // checked every second while a fight runs: runes, ammo and prayer points can run out
   const fightCheck = (skill) => {
     const pl = player(), sp = pl.spellSelection.attack;
-    if (skill.id === PRAYER && !(pl.prayerPoints > 0)) return { why: "out of prayer points (bury some bones for more)" };
+    if (skill.id === PRAYER && !(pl.prayerPoints > 0) && !buryBones()) return { why: "out of prayer points, with no bones left to bury" };
     if (pl.attackType === "ranged" && !(pl.equipment.equippedItems["melvorD:Quiver"]?.quantity > 0)) return { why: "out of ammo" };
     if (pl.attackType === "magic" && sp && !pl.getRuneCosts(sp).every((k) => owned(k.item) >= k.quantity)) return { why: "out of runes", noMaterials: true };
     return null;
@@ -328,25 +372,24 @@ export function setup(ctx) {
       for (const p of s.prayers) if (!pl.activePrayers.has(p)) pl.togglePrayer(p);
     } catch (e) { console.warn(TAG, "restoring combat settings", e); }
   };
+  // an Attack, Strength, Ranged or Magic goal can switch to another equipment set; it switches back when the goal is done
+  const restoreSet = (e) => {
+    const pl = player();
+    if (e.wasSet === undefined || !pl || pl.selectedEquipmentSet === e.wasSet || game.activeAction === game.combat) return;
+    try { pl.changeEquipmentSet(e.wasSet); } catch (err) { console.warn(TAG, "switching your equipment set back", err); }
+  };
   const fighting = (m) => game.activeAction === game.combat && game.combat.selectedMonster === m;
   const startFight = (skill, m, area) => {
     const pl = player(), style = styleFor(skill), pr = skill.id === PRAYER && bestPrayer();
     if (game.activeAction && !fighting(m)) game.stopActiveAction();
     savedCombat ??= { type: pl.attackType, style: pl.attackStyles[pl.attackType], prayers: [...pl.activePrayers] };
     if (style && pl.attackStyles[pl.attackType] !== style) pl.setAttackStyle(pl.attackType, style);
+    if (pr && !(pl.prayerPoints > 0)) buryBones();
     if (pr && !pl.activePrayers.has(pr)) pl.togglePrayer(pr);
     if (!fighting(m)) game.combat.selectMonster(m, area);
   };
-  // the numbers behind each fight are worked out once a second, since the planner asks for them many times
-  const fightMemo = { t: 0, m: new Map() };
-  const fightEval = (key, fn) => {
-    const t = Math.floor(Date.now() / 1000);
-    if (t !== fightMemo.t) Object.assign(fightMemo, { t, m: new Map() });
-    if (!fightMemo.m.has(key)) fightMemo.m.set(key, fn());
-    return fightMemo.m.get(key);
-  };
   const fightMethods = (skill) => [...list(game.combatAreas), ...list(game.slayerAreas)].filter(realmOk).flatMap((area) => (area.monsters ?? []).filter((m) => realmOk(m) && m.levels).map((m) => {
-    const ev = () => fightEval(`${skill.id}|${area.id}|${m.id}`, () => ({ ...killStats(m), xp: xpPerKill(skill, m, area), hit: maxTaken(m) }));
+    const ev = () => perSec(`${skill.id}|${area.id}|${m.id}`, () => ({ ...killStats(m), xp: xpPerKill(skill, m, area), hit: maxTaken(m) }));
     return method(skill, m, {
       id: `fight:${area.id}:${m.id}`, name: `Fight ${nm(m)}${game.slayerAreas.allObjects.includes(area) ? ` (${nm(area)})` : ""}`, media: m.media, product: null, level: 1, succ: 1,
       actor: game.combat, noMastery: true, cap: () => (skill.id === SLAYER && !game.slayerAreas.allObjects.includes(area) ? game.combat.slayerTask.killsLeft : Infinity),
@@ -447,6 +490,7 @@ export function setup(ctx) {
         title = `${icon(n.item)}<b>${esc(nm(n.item))}</b> &times;${num(n.qty)}`;
         body = chips(haveChip) + (g.length
           ? chips(chip(`<i class="fa fa-hand-paper"></i> <b>Gather</b>`, "lbl"), ...g.slice(0, 3).map((x) => chip(`${esc(nm(x.skill))}: ${esc(nm(x.a))} (Lv ${lvl(x.a)})`))) + (lb ? chips(lvlChip(lb.skill, lb.a)) : "")
+          : shopOnly(n.item) ? chips(chip(`<i class="fa fa-shopping-cart"></i> <b>Buy</b>`, "lbl"), chip(`From the shop for ${esc(costText(costsOf(game.shop.getPurchaseCosts(shopFor(n.item), Math.ceil(n.qty / perBuy(shopFor(n.item)))))))}`), chip("Asks you first", "ok"))
           : chips(chip(MANUAL_NOTE, "warn")));
       }
       return step(`<div class="mst-stepno">Step ${i + 1}</div><div class="mst-title">${title}</div>${body}`);
@@ -458,6 +502,8 @@ export function setup(ctx) {
     const base = { itemId: n.item.id, qty: n.qty }, c = n.recipe?.c, g = !c && gatherer(n.item.id);
     if (c) return { ...base, kind: "craft", skillId: c.skill.id, actionId: c.a.id, altIndex: 0, label: `${nm(c.skill)}: make ${nm(n.item)}` };
     if (g) return { ...base, kind: "gather", skillId: g.skill.id, actionId: g.a.id, label: `${nm(g.skill)}: gather ${nm(n.item)}` };
+    // qty for a buy step is how many you should own, like a manual step
+    if (shopOnly(n.item)) return { ...base, qty: owned(n.item) + n.qty, kind: "ask", what: "buy", label: `Buy ${nm(n.item)}` };
     return { ...base, qty: n.need ?? n.qty, kind: "manual", label: `Get ${nm(n.item)}`, note: MANUAL_NOTE };
   });
   // the steps that get the missing materials for `crafts` more attempts; null if the queue can't get one of them
@@ -469,17 +515,154 @@ export function setup(ctx) {
     return entries;
   };
 
+  // ---------- the shop ----------
+  // Things nothing else makes (feathers, compost, Summoning shards) can come from the shop. Only plain purchases of one item
+  // for currency count, and the queue asks you before every purchase.
+  let shopIdx = null;
+  const shopFor = (item) => {
+    if (!shopIdx) {
+      shopIdx = new Map();
+      for (const p of list(game.shop?.purchases)) { const c = p.contains; if (p.allowQuantityPurchase && c?.items?.length === 1 && Object.keys(c).length === 1 && !p.costs?.items?.length) shopIdx.set(c.items[0].item.id, p); }
+    }
+    return item ? shopIdx.get(item.id) : undefined;
+  };
+  const shopOnly = (item) => !!shopFor(item) && !crafter(item.id) && !gatherer(item.id);
+  const perBuy = (p) => p.contains.items[0].quantity || 1;
+  // why you can't buy n of it right now (null when you can)
+  const buyIssue = (p, n) => {
+    const it = p.contains.items[0].item;
+    if (!game.checkRequirements([...(p.unlockRequirements ?? []), ...(p.purchaseRequirements ?? [])])) return `you don't meet the shop's requirements for ${nm(it)} yet`;
+    if (game.shop.isPurchaseAtBuyLimit(p)) return `you've reached the shop's buy limit for ${nm(it)}`;
+    const c = game.shop.getPurchaseCosts(p, Math.ceil(n / perBuy(p)));
+    return c.checkIfOwned() ? null : `you can't afford ${num(n)} ${nm(it)} right now (${costText(costsOf(c))})`;
+  };
+  // how many more of an item you could buy right now (0 when the shop doesn't sell it)
+  const buyLeft = (item) => !shopOnly(item) ? 0 : perSec(`buy|${item.id}`, () => {
+    try { const p = shopFor(item); return buyIssue(p, 1) ? 0 : perBuy(p) * Math.min(...game.shop.getPurchaseCosts(p, 1).getCurrencyQuantityArray().map((k) => Math.floor((k.currency.amount ?? 0) / k.quantity))); } catch (e) { return 0; }
+  });
+
+  // ---------- Slayer tasks ----------
+  // A Slayer goal with no task asks you about rolling one: the cheapest tier you have the Slayer level for and can pay for,
+  // as long as some of its monsters are safe for you to fight while you're away
+  const slayerTier = () => {
+    const st = game.combat.slayerTask, sl = skillById(SLAYER)?.level ?? 1;
+    for (const c of list(st?.categories)) {
+      if ((c.realm?.id ?? MELVOR) !== MELVOR || (c.level ?? 1) > sl || !st.getRollCosts(c).checkIfOwned()) continue;
+      const mons = st.getMonsterSelection(c), safe = mons.filter((m) => { const h = maxTaken(m); return h !== null && takeSafety(h).ok; });
+      if (safe.length) return { c, mons, safe };
+    }
+    return null;
+  };
+  const hasTask = () => { const t = game.combat.slayerTask; return !!t?.monster && t.killsLeft > 0; };
+
+  // ---------- steps that ask you first ----------
+  // An "ask" step stops and asks before it spends anything or changes your game: building an obstacle, buying from the shop,
+  // rolling a Slayer task, making a dig site map. Switching to another equipment set doesn't ask, and when no set fits,
+  // the step waits for you to equip the right weapon. The answer is kept on the step and the queue carries on.
+  const popHtml = (o, rows, foot) => step(`<div class="mst-title">${icon(o)}<b>${esc(nm(o))}</b></div>${rows}`) + note(foot);
+  const ASKS = {
+    build: {
+      target: (e) => list(game.agility?.actions).find((x) => x.id === e.actionId),
+      done: (e, o) => { const there = o.course?.builtObstacles?.get(o.category) ?? game.agility.activeCourse.builtObstacles.get(o.category); return there ? (there === o ? "Already built" : `Slot already has ${nm(there)}`) : null; },
+      skip: (e, o, parent) => { if (parent) parent.noBuild = [...(parent.noBuild ?? []), o.category]; },
+      cannot: (e, o) => (game.agility.getObstacleBuildCosts(o).checkIfOwned() ? null : `you can't pay for ${nm(o)} right now (${costText(buildCosts(o))})`),
+      act: (e, o) => { game.agility.buildObstacle(o); return "Built"; },
+      turn: (e, o) => `confirm building ${nm(o)}, or skip it.`,
+      pop: (e, o) => {
+        const slot = game.agility.activeCourse.obstacleSlots[o.category], mods = (o.modifiers ?? []).map((v) => { try { return v.getDescription().description; } catch (err) { return ""; } }).filter(Boolean);
+        return { title: "Build an Agility obstacle?", yes: "Build", html: popHtml(o, chips(chip(`Slot ${o.category + 1} (Agility level ${slot?.level ?? 1})`), chip(`${num(o.baseExperience ?? 0)} XP per lap`), chip(`${num((o.baseInterval ?? 0) / 1000)} s`)) +
+          chips(chip("<b>Costs</b>", "lbl"), chip(esc(costText(buildCosts(o))))) + (mods.length ? chips(chip("<b>Bonuses</b>", "lbl"), ...mods.map((d) => chip(esc(d), "ok"))) : ""),
+          "Building can't be undone. Skip leaves this slot empty for this goal.") };
+      },
+    },
+    buy: {
+      target: (e) => { const it = itemById(e.itemId), p = shopFor(it); return p && { it, p, n: () => Math.max(0, e.qty - owned(it)) }; },
+      done: (e, t) => (t.n() <= 0 ? "You have enough" : null),
+      // skipping something a recipe needs turns it into a step you do yourself; skipping compost just plants without it
+      skip: (e, t, parent) => {
+        if (e.optional) { if (parent) parent.noCompost = true; return false; }
+        Object.assign(e, { kind: "manual", label: `Get ${nm(t.it)}`, note: MANUAL_NOTE }); delete e.what; delete e.answer;
+        return true;
+      },
+      cannot: (e, t) => buyIssue(t.p, t.n()),
+      act: (e, t) => {
+        const n = t.n(), buys = Math.ceil(n / perBuy(t.p)), sh = game.shop, was = sh.buyQuantity, cost = costText(costsOf(sh.getPurchaseCosts(t.p, buys)));
+        try { sh.buyQuantity = buys; sh.buyItemOnClick(t.p, true); } finally { sh.buyQuantity = was; }
+        return t.n() <= 0 ? `Bought ${num(buys * perBuy(t.p))} for ${cost}` : { block: `the shop didn't sell you ${nm(t.it)} (is your bank full?)` };
+      },
+      turn: (e, t) => `confirm buying ${nm(t.it)}, or skip it.`,
+      pop: (e, t) => {
+        const n = t.n(), c = game.shop.getPurchaseCosts(t.p, Math.ceil(n / perBuy(t.p)));
+        return { title: "Buy from the shop?", yes: "Buy", html: popHtml(t.it, chips(chip(`Buy ${num(Math.ceil(n / perBuy(t.p)) * perBuy(t.p))}`), chip(`You have ${num(owned(t.it))}`)) + chips(chip("<b>Costs</b>", "lbl"), chip(esc(costText(costsOf(c))))),
+          e.optional ? "Compost makes every crop grow. Skip plants without it for the rest of this goal." : "Skip turns this into a step you do yourself.") };
+      },
+    },
+    slayer: {
+      target: (e) => list(game.combat.slayerTask?.categories).find((c) => c.id === e.actionId),
+      done: () => (hasTask() ? `Task: ${nm(game.combat.slayerTask.monster)} x${num(game.combat.slayerTask.killsLeft)}` : null),
+      skip: (e, c, parent) => { if (parent) parent.noTask = true; },
+      cannot: (e, c) => { const k = game.combat.slayerTask.getRollCosts(c); return k.checkIfOwned() ? null : `you can't pay for ${aOr(nm(c))} task right now (${costText(costsOf(k))})`; },
+      act: (e, c) => {
+        const st = game.combat.slayerTask;
+        st.selectTask(c, true, true, true);
+        // the game starts the task a second later; start it now so the plan can count it
+        if (st.monster && !(st.killsLeft > 0)) { st.taskTimer?.stop?.(); st.setTask(); }
+        return hasTask() ? `Task: ${nm(st.monster)} x${num(st.killsLeft)}` : { block: `the game didn't give you ${aOr(nm(c))} task` };
+      },
+      turn: (e, c) => `confirm rolling ${aOr(nm(c))} Slayer task, or skip it.`,
+      pop: (e, c) => {
+        const t = slayerTier(), k = game.combat.slayerTask.getRollCosts(c), n = t?.c === c ? t : { mons: [], safe: [] };
+        return { title: "Roll a Slayer task?", yes: "Roll", html: popHtml(c, chips(chip(`Costs ${esc(costText(costsOf(k)))}`), chip(`${n.safe.length} of ${n.mons.length} monsters are safe for you`, n.safe.length ? "ok" : "warn")),
+          "The task is random. If you get a monster that isn't safe while you're away, the queue trains in Slayer areas instead. Skip doesn't ask again for this goal.") };
+      },
+    },
+    map: {
+      target: (e) => list(game.archaeology?.actions).find((x) => x.id === e.actionId),
+      done: (e, s) => { pickTools(s); return game.archaeology.canExcavate(s) ? "Map ready" : null; },
+      skip: (e, s, parent) => { if (parent) parent.noMap = true; },
+      cannot: (e, s) => { const k = game.cartography.getMapCreationCosts(s); return !s.poi?.isDiscovered ? `you haven't found ${nm(s)} on the map yet` : k.checkIfOwned() ? null : `you don't have what ${aOr(nm(s))} map takes (${costText(costsOf(k))})`; },
+      act: (e, s) => {
+        game.cartography.createNewMapForDigSite(s);
+        if (!(s.selectedMap?.charges > 0) && s.maps.length) try { s.selectedMapIndex = s.maps.length - 1; } catch (err) { /* the game picks it */ }
+        pickTools(s);
+        return game.archaeology.canExcavate(s) ? "Map made" : { block: `the map for ${nm(s)} couldn't be made or picked. Pick it in Archaeology, then press Start` };
+      },
+      turn: (e, s) => `confirm making a map for ${nm(s)}, or skip it.`,
+      pop: (e, s) => ({ title: "Make a dig site map?", yes: "Make map", html: popHtml(s, chips(chip(`Archaeology level ${lvl(s)}`), chip("<b>Costs</b>", "lbl"), chip(esc(costText(costsOf(game.cartography.getMapCreationCosts(s)))))),
+        "Uses up the materials. The queue picks all your tools for the site too. Skip doesn't ask again for this goal.") }),
+    },
+    // set: another equipment set to switch to (no question asked), or -1 to wait for you
+    equip: {
+      target: (e) => skillById(e.skillId),
+      done: (e, s) => (weaponGap(s) ? null : e.set >= 0 ? `Switched to equipment set ${e.set + 1}` : "Done"),
+      auto: (e) => e.set >= 0,
+      act: (e, s, parent) => {
+        const pl = player();
+        if (game.activeAction === game.combat) game.stopActiveAction();
+        if (parent && parent.wasSet === undefined) parent.wasSet = pl.selectedEquipmentSet;
+        try { pl.changeEquipmentSet(e.set); } catch (err) { /* checked below */ }
+        return weaponGap(s) ? { block: `equipment set ${e.set + 1} doesn't fight with a ${WEAPON[s.id]} weapon` } : `Switched to equipment set ${e.set + 1}`;
+      },
+      turn: (e, s) => `equip a ${WEAPON[s.id]} weapon${WEAPON[s.id] === "ranged" ? " and ammo" : ""}. The queue carries on once you do.`,
+    },
+  };
+  // the confirm window for an ask step
+  const askPop = (e, { title, html, yes }) => SwalLocale.fire({
+    title, width: 560, showCancelButton: true, confirmButtonText: yes, cancelButtonText: "Skip", html: `<div class="text-center font-size-sm mst-th-pop">${html}</div>`,
+  })?.then?.((r) => { e.answer = r?.isConfirmed ? "yes" : r?.dismiss === "cancel" ? "skip" : undefined; e.asking = false; Queue.save(); if (e.answer) Runner.start(); });
+  const askIcon = (e) => { try { const t = ASKS[e.what]?.target(e); return e.what === "buy" ? t?.it : e.what === "slayer" ? skillById(SLAYER) : t; } catch (err) { return null; } };
+
   // ---------- queue (saved locally, one list per character name) ----------
   // gather and craft run a game action until you have more of an item, skill runs one until it has given enough XP,
   // manual waits for the player, train plans the next batch of steps
-  const KINDS = new Set(["gather", "craft", "skill", "manual", "train", "build"]);
+  const KINDS = new Set(["gather", "craft", "skill", "manual", "train", "ask"]);
   const Queue = {
     items: [],
     key: () => `mst-th-queue:${game.characterName ?? "default"}`,
     load() {
       try { this.items = JSON.parse(stored(this.key()) ?? "[]").filter((e) => KINDS.has(e.kind)); } catch (e) { this.items = []; }
       // the runner never survives a reload, so nothing is "in progress" any more (progress counts are kept)
-      for (const e of this.items) { if (["active", "waiting", "blocked"].includes(e.status)) e.status = "pending"; for (const k of ["reason", "ack", "t0", "g0", "asking"]) delete e[k]; }
+      for (const e of this.items) { if (["active", "waiting", "blocked"].includes(e.status)) e.status = "pending"; for (const k of ["reason", "ack", "t0", "g0", "asking", "info", "readyAt"]) delete e[k]; }
       updateBadge();
     },
     save() { if (!store(this.key(), JSON.stringify(this.items))) console.warn(TAG, "could not save queue"); updateBadge(); Panel.render(); },
@@ -542,7 +725,7 @@ export function setup(ctx) {
 
   // ---------- time estimates (base speeds; the active entry switches to its measured speed after a few seconds) ----------
   const estimateMs = (e) => {
-    if (e.kind === "manual" || e.kind === "build" || e.status === "done") return 0;
+    if (e.kind === "manual" || e.kind === "ask" || e.status === "done") return 0;
     if (e.kind === "train") return trainEstimate(e);
     const units = Math.max(0, e.qty - Runner.gained(e));
     if (units <= 0) return 0;
@@ -577,7 +760,21 @@ export function setup(ctx) {
       }
       return r;
     },
-    current() { const f = this.focusId && Queue.items.find((e) => e.id === this.focusId && e.status !== "done"); if (!f) this.focusId = null; return f || Queue.items.find((e) => e.status !== "done"); },
+    current() {
+      const f = this.focusId && Queue.items.find((e) => e.id === this.focusId && e.status !== "done");
+      if (!f) this.focusId = null;
+      const top = f || Queue.items.find((e) => e.status !== "done");
+      return this.sideJob(top) ?? top;
+    },
+    // while a Farming step waits for its crops, a later step that doesn't need them runs: gathering, or a skill step or
+    // fight that uses no materials. The crops come first again as soon as one is ready.
+    sideJob(top) {
+      if (!(top?.readyAt > Date.now()) || this.state !== "running" || !Settings.get("sideJobs")) return null;
+      return Queue.items.slice(Queue.items.indexOf(top) + 1).find((e) => {
+        const m = e.status !== "done" && e.status !== "blocked" && (e.kind === "gather" || e.kind === "skill") && methodById(skillById(e.skillId), e.actionId);
+        return m && !m.tick && (e.kind === "gather" || !m.options[0].costs.length);
+      }) ?? null;
+    },
     doFirst(id) {
       const e = Queue.items.find((x) => x.id === id);
       if (!e || e.status === "done") return;
@@ -602,7 +799,7 @@ export function setup(ctx) {
       const cur = this.current();
       if (!cur) return this.setState("idle", "Nothing to run: the queue is empty or finished.");
       if (cur.kind === "manual" && cur.status === "waiting") cur.ack = true;
-      if (cur.kind === "build") cur.asking = false;
+      if (cur.kind === "ask") cur.asking = false;
       if (this.state === "idle") this.elapsed = 0;
       Object.assign(this, { state: "running", message: "" }).step();
       Panel.render();
@@ -650,7 +847,7 @@ export function setup(ctx) {
         // a "train to level" entry never runs itself: it works out the next batch of steps, puts them above itself, and comes back
         if (cur.kind === "train") {
           const sk = skillById(cur.skillId);
-          if (!sk || sk.level >= cur.targetLevel) { this.finish(cur); continue; }
+          if (!sk || sk.level >= cur.targetLevel) { this.finish(cur); restoreSet(cur); continue; }
           const xpNow = Math.floor(sk.xp ?? 0);
           cur.stall = cur.lastXp !== undefined && xpNow <= cur.lastXp ? (cur.stall ?? 0) + 1 : 0;
           cur.lastXp = xpNow;
@@ -662,20 +859,33 @@ export function setup(ctx) {
           continue;
         }
 
-        // a build step asks you, then builds or skips
-        if (cur.kind === "build") {
-          const ag = game.agility, o = list(ag?.actions).find((x) => x.id === cur.actionId), parent = Queue.items.find((x) => x.id === cur.parent);
+        // an ask step asks you (or waits for you), then does it or skips it
+        if (cur.kind === "ask") {
+          const A = ASKS[cur.what], t = A?.target(cur), parent = Queue.items.find((x) => x.id === cur.parent);
           this.leave();
-          if (!o) return this.block(cur, "this obstacle wasn't found in your game version");
-          const there = o.course?.builtObstacles?.get(o.category) ?? ag.activeCourse.builtObstacles.get(o.category);
-          if (there) { cur.sold = there === o ? "Already built" : `Slot already has ${nm(there)}`; this.finish(cur); continue; }
-          if (cur.answer === "skip") { if (parent) parent.noBuild = [...(parent.noBuild ?? []), o.category]; cur.sold = "Skipped"; this.finish(cur); continue; }
-          if (!ag.getObstacleBuildCosts(o).checkIfOwned()) return this.block(cur, `you can't pay for ${nm(o)} right now (${costText({ o, ...buildCosts(o) })})`);
-          if (cur.answer === "build") { ag.buildObstacle(o); cur.sold = "Built"; this.finish(cur); continue; }
-          if (!cur.asking) { cur.asking = true; askBuild(cur, o); }
+          if (!t) return this.block(cur, "this wasn't found in your game version");
+          const did = A.done(cur, t);
+          if (did) { cur.sold = did; this.finish(cur); continue; }
+          if (cur.answer === "skip") {
+            secMemo.m.clear();
+            if (A.skip?.(cur, t, parent)) { cur.status = "pending"; Queue.save(); continue; }
+            cur.sold = "Skipped"; this.finish(cur); continue;
+          }
+          const no = A.cannot?.(cur, t);
+          if (no) return this.block(cur, no);
+          if (cur.answer === "yes" || A.auto?.(cur)) {
+            const r = A.act(cur, t, parent);
+            secMemo.m.clear(); // your gear, task or bank just changed
+            if (r?.block) return this.block(cur, r.block);
+            cur.sold = r; this.finish(cur); continue;
+          }
           cur.status = "waiting";
+          cur.info = `waiting for you: ${A.turn(cur, t)}`;
           Queue.save();
-          return this.setState("paused", `Your turn: confirm building ${nm(o)}, or skip it.`);
+          // no window to answer: keep checking until you've done it
+          if (!A.pop) { if (!cur.told) { cur.told = true; tellPlayer(`Skill Trainer: ${A.turn(cur, t)}`); } return Panel.render(); }
+          if (!cur.asking) { cur.asking = true; askPop(cur, A.pop(cur, t)); }
+          return this.setState("paused", `Your turn: ${A.turn(cur, t)}`);
         }
 
         // a different entry is now on top (we just started, or something was added above): switch to it
@@ -706,7 +916,12 @@ export function setup(ctx) {
 
         const skill = skillById(cur.skillId), m = methodById(skill, cur.actionId), safety = m?.safe?.(), chk = m?.check?.(), actor = m?.actor ?? skill;
         // a Farming step has no action to run: it plants, waits and harvests
-        if (m?.tick) { const t = m.tick(cur); if (t.block) return this.block(cur, t.block); return this.wait(t.note ?? ""); }
+        if (m?.tick) {
+          const t = m.tick(cur);
+          if (t.block) return this.block(cur, t.block);
+          Object.assign(cur, { info: t.note, readyAt: t.readyIn > 0 ? Date.now() + t.readyIn : undefined });
+          return Panel.render();
+        }
         // food, runes, ammo and prayer points can run out mid-step: stop before it isn't safe any more
         if (safety && !safety.ok) return this.block(cur, `not safe while you're away: ${safety.why}`);
         if (chk && !chk.noMaterials) return this.block(cur, chk.why);
@@ -757,6 +972,8 @@ export function setup(ctx) {
   const makeTime = (item, n, lv, skillId, seen = new Set(), depth = 0) => {
     if (!(n > 0)) return { ms: 0, xp: 0 };
     const NO = { ms: Infinity, xp: 0 }, c = crafter(item.id), g = !c && gatherer(item.id), x = c || g;
+    // buying from the shop takes no time (you still confirm each purchase)
+    if (!x) return buyLeft(item) >= n ? { ms: 0, xp: 0 } : NO;
     if (depth > 10 || seen.has(item.id) || !x || x.a.level > levelIn(x.skill, lv) || x.a.need?.(lv)) return NO;
     if (g) { const acts = n / Math.max(1, g.a.qty); return { ms: acts * g.a.ms, xp: g.skill.id === skillId ? acts * g.a.xp : 0 }; }
     const opt = c.a.options[0], crafts = n / perAttempt(c.a, opt); // attempts, not rounded: ranks methods by their steady rate
@@ -768,8 +985,8 @@ export function setup(ctx) {
   };
   // the same, but what the queue can't get itself is free while the bank holds enough of it (shards, feathers, bones)
   const acquire = (item, n, lv, skillId, seen, depth) => { const r = makeTime(item, n, lv, skillId, seen, depth); return isFinite(r.ms) || owned(item) < n ? r : { ms: 0, xp: 0 }; };
-  // how many attempts the bank allows for the costs the queue can't get itself
-  const stockCap = (costs) => Math.min(Infinity, ...costs.filter((k) => !isFinite(makeTime(k.item, 1).ms)).map((k) => Math.floor(owned(k.item) / k.quantity)));
+  // how many attempts the bank (and what you could buy) allows for the costs the queue can't gather or make
+  const stockCap = (costs) => Math.min(Infinity, ...costs.filter((k) => shopOnly(k.item) || !isFinite(makeTime(k.item, 1).ms)).map((k) => Math.floor((owned(k.item) + buyLeft(k.item)) / k.quantity)));
   // the same step the queue would really run for this product (first crafter, or first gatherer). Methods that make nothing,
   // and extra ways to make something (Superheat), run as their own XP step.
   const stepFor = (m) => {
@@ -864,6 +1081,30 @@ export function setup(ctx) {
     // an Agility goal fills the empty slots of your course first (you confirm each obstacle)
     const picks = skill.id === AGILITY && !e.forced ? agilityPicks(e.noBuild) : [];
     if (picks.length) return { ok: true, entries: buildSteps(picks, e.id), note: `building your course first (${plural(picks.length, "obstacle")})` };
+    // Attack, Strength, Ranged and Magic need the right weapon: switch to a set that has one, or wait for you to equip it
+    if (weaponGap(skill)) {
+      const i = setFor(skill), w = WEAPON[skill.id];
+      return { ok: true, entries: [{ kind: "ask", what: "equip", skillId: skill.id, actionId: w, set: i, qty: 1, parent: e.id, label: i >= 0 ? `Switch to equipment set ${i + 1} (${w})` : `Equip a ${w} weapon` }],
+        note: i >= 0 ? `switching to equipment set ${i + 1} first` : `waiting for you to equip a ${w} weapon` };
+    }
+    // a Slayer goal with no task asks about rolling one
+    if (skill.id === SLAYER && !e.noTask && !hasTask()) {
+      const t = slayerTier();
+      if (t) return { ok: true, entries: [{ kind: "ask", what: "slayer", skillId: SLAYER, actionId: t.c.id, qty: 1, parent: e.id, label: `Slayer: roll ${aOr(nm(t.c))} task` }], note: "asking you about a Slayer task first" };
+    }
+    // an Archaeology goal with no map to dig with makes one first (you confirm it), and picks your tools
+    if (skill.id === ARCH) {
+      for (const s of list(skill.actions)) pickTools(s);
+      if (!e.noMap && !list(skill.actions).some((s) => lvl(s) <= skill.level && skill.canExcavate?.(s))) {
+        const { site, hidden } = mapSite();
+        if (!site && hidden) return fail("you haven't found a dig site you can map yet. Survey the map in Cartography to find one");
+        if (site) {
+          const mats = materialSteps(costsOf(game.cartography.getMapCreationCosts(site)).items, 1, e.id);
+          if (!mats) return fail(`a map for ${nm(site)} needs something the queue can't get on its own`);
+          return { ok: true, entries: [...mats, { kind: "ask", what: "map", skillId: ARCH, actionId: site.id, qty: 1, parent: e.id, label: `Make a map for ${nm(site)}` }], note: `making a map for ${nm(site)} first` };
+        }
+      }
+    }
     const dt = !e.forced && !e.noDetour && bestDetour(skill, e.targetLevel);
     if (dt && (skillById(dt.skill.id)?.level ?? 0) < dt.level) return {
       ok: true,
@@ -886,12 +1127,16 @@ export function setup(ctx) {
       if (e.targetXp !== undefined && e.targetXp <= xpAt(b.to)) last.untilXp = e.targetXp;
       return { ok: true, entries: [...entries, last], to: b.to, note };
     }
-    const item = m.product, entries = toEntries(buildRows(item, Math.ceil(actions * b.c.per), true)), last = entries[entries.length - 1];
+    const item = m.product, entries = toEntries(buildRows(item, Math.max(1, Math.floor(actions * b.c.per + 1e-9)), true)), last = entries[entries.length - 1];
     if (last?.itemId !== item.id) return fail("couldn't work out the steps");
     if (entries.some((x) => x.kind === "manual")) return fail(`${nm(item)} needs something the queue can't get on its own`);
     Object.assign(last, { untilLevel: b.to, untilSkill: skill.id, sellAll: !!e.sellMade });
     if (e.targetXp !== undefined && e.targetXp <= xpAt(b.to)) last.untilXp = e.targetXp;
     for (const x of entries) x.parent = e.id;
+    // Farming: offer to buy compost so every crop grows (skip it once and this goal plants without)
+    const comp = itemById(COMPOST);
+    if (skill.id === FARMING && !e.noCompost && shopFor(comp) && owned(comp) < compostPer())
+      entries.unshift({ kind: "ask", what: "buy", optional: true, itemId: COMPOST, qty: Math.ceil(actions * m.succ) * compostPer(), parent: e.id, label: "Buy compost for your crops" });
     return { ok: true, entries, to: b.to, note };
   };
   const trainEstimate = (e) => {
@@ -967,6 +1212,16 @@ export function setup(ctx) {
     if (addUnique(buildSteps(picks), false)) tellPlayer(`Added ${plural(picks.length, "obstacle")} to build. You'll confirm each one before anything is spent.`);
     Panel.open();
   };
+  // what a goal does first that the plan below doesn't show (switch gear, roll a Slayer task, make a map)
+  const goalFirst = (sk) => {
+    if (weaponGap(sk)) {
+      const i = setFor(sk), w = WEAPON[sk.id];
+      return i >= 0 ? `Your equipment set ${i + 1} has a ${w} weapon. This goal switches to it first and back when it's done.` : `You don't have a ${w} weapon on. When this goal starts it waits for you to equip one.`;
+    }
+    if (sk.id === SLAYER && !hasTask()) { const t = slayerTier(); if (t) return `You have no Slayer task. This goal asks you before rolling ${aOr(nm(t.c))} task (${t.safe.length} of its ${t.mons.length} monsters are safe for you).`; }
+    if (sk.id === ARCH && !list(sk.actions).some((s) => lvl(s) <= sk.level && sk.canExcavate?.(s))) { const { site } = mapSite(); if (site) return `You have no map to dig with. This goal makes a map for ${nm(site)} first, once you confirm it.`; }
+    return null;
+  };
   const trainLevel = (sk) => {
     const cap = levelCap(sk), L = Math.floor(TS.level || 0);
     if (!(L > sk.level) || L > cap) return nothing(sk.level >= cap ? `${nm(sk)} is already at its highest level.` : `Pick a target level between ${sk.level + 1} and ${cap}.`);
@@ -974,6 +1229,8 @@ export function setup(ctx) {
     const goal = [{ kind: "train", skillId: sk.id, targetLevel: L, targetXp: xpAt(L), qty: xpAt(L), forced: TS.forced || undefined, sellMade: TS.sell, label: `${nm(sk)}: reach level ${L}` }];
     // an empty course can still take a goal: it builds first, then runs
     if (!plan.batches.length && picks.length) return { html: dupHtml(goal) + courseHtml(picks) + note("Your course is empty, so this goal builds it first and then runs it."), entries: goal };
+    const first = !TS.forced && goalFirst(sk);
+    if (!plan.batches.length && first) return { html: dupHtml(goal) + step(chips(chip(esc(first), "ok"))) + note("The plan is worked out once that's done."), entries: goal };
     if (!plan.batches.length) {
       const why = blockedWhy(sk), msg = why ? `Nothing here can be trained right now: ${why}.` : "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
       return nothing(msg, step(chips(chip(`${warnIcon}${esc(msg)}`, "warn"))));
@@ -992,7 +1249,7 @@ export function setup(ctx) {
     }).join("");
     const okIds = !TS.forced && new Set(trainCands(sk).map((c) => c.a.id));
     const skipped = okIds && methodsOf(sk).some((m) => m.level <= sk.level && m.xp > 0 && m.safe?.().ok !== false && !okIds.has(m.id) && xpRate(m) > plan.batches[0].c.rate);
-    html += courseHtml(picks);
+    html += courseHtml(picks) + (first ? step(chips(chip(esc(first), "ok"))) : "");
     html += note("Methods are ranked by XP per hour including the time to gather what they need, so it won't farm a mountain of materials for little XP. The queue re-checks your level and bank after every batch." +
       (skipped ? " Some faster methods are left out because their materials need higher levels in other skills, or come from the shop or monsters." : ""));
     return { html, entries };
@@ -1114,15 +1371,16 @@ export function setup(ctx) {
         : '<i class="fa fa-circle mr-2" style="opacity:.25;font-size:8px;vertical-align:middle"></i>';
       const showProgress = !manual && !done && e.startQty !== undefined && (e.status === "active" || e.status === "blocked" || Runner.gained(e) > 0);
       const xpUnit = e.kind === "skill" ? " XP" : "";
-      const amount = e.kind === "build" ? "" : isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}${xpUnit}` : e.kind === "skill" ? `${num(e.qty)} XP` : `x${num(e.qty)}`;
+      const amount = e.kind === "ask" ? (e.what === "buy" ? `x${num(e.qty)}` : "") : isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}${xpUnit}` : e.kind === "skill" ? `${num(e.qty)} XP` : `x${num(e.qty)}`;
       const btn = (act, ic, title, cls = "text-white-50") => `<a data-act="${act}" data-id="${esc(e.id)}" class="pointer-enabled ${cls} ml-2" title="${title}"><i class="fa ${ic}"></i></a>`;
       const sub = done && e.sold ? small("text-muted", esc(e.sold)) : e.reason ? small("text-warning", esc(e.reason))
         : issue ? small("text-warning", `<i class="fa fa-exclamation-triangle"></i> ${esc(issue)}`)
         : isTrain && e.now && !done ? small("text-muted", `now: ${esc(e.now)}`)
         : manual && !done ? small("text-muted", `do this yourself${e.status === "waiting" ? " (waiting for you)" : ""}`)
-        : e.kind === "build" && !done ? small("text-muted", e.status === "waiting" ? "waiting for you to confirm" : "asks you before building") : "";
+        : e.info && !done && (e.kind !== "ask" || e.status === "waiting") ? small("text-muted", esc(e.info))
+        : e.kind === "ask" && !done ? small("text-muted", e.what === "equip" ? (e.set >= 0 ? "switches your equipment set" : "waits for you to equip it") : e.optional ? "optional, asks you first" : "asks you first") : "";
       return `<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07);${done ? "opacity:.5" : ""}" ${manual ? `title="${esc(e.note ?? "")}"` : ""}>` +
-        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : e.kind === "build" ? list(game.agility?.actions).find((x) => x.id === e.actionId) : e.kind === "skill" ? methodById(skillById(e.skillId), e.actionId) ?? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
+        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : e.kind === "ask" ? askIcon(e) : e.kind === "skill" ? methodById(skillById(e.skillId), e.actionId) ?? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
         `${Runner.focusId === e.id ? ' <span class="badge badge-success">first</span>' : ""}${sub}</div>` +
         (done ? btn("remove", "fa-times", "Remove") : btn("first", "fa-play-circle", "Do this first (keeps its place in the list)", "text-success") +
           btn("top", "fa-angle-double-up", "Move to top") + btn("up", "fa-arrow-up", "Move up") + btn("down", "fa-arrow-down", "Move down") + btn("remove", "fa-times", "Remove")) + `</div>`;
