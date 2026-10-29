@@ -19,13 +19,23 @@ Some recipes need things the queue can't gather or craft, like feathers, herbs o
 
 ## Skills it can train
 
-Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic and Harvesting.
+Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic and Harvesting, plus the combat skills: Attack, Strength, Defence, Hitpoints, Ranged, Prayer and Slayer.
 
 - Firemaking, Thieving and Astrology don't make anything you'd ask for, so they only take level goals. Firemaking cuts the logs it needs first.
 - Thieving can hurt you when a pickpocket fails, so the queue only thieves when it's safe while you're away. That means food equipped and auto eat set to start above the target's biggest hit. If your food runs out, the queue stops.
 - Summoning shards come from the shop, so the queue uses the shards in your bank and plans around them. The same goes for anything else it can't get itself, like feathers or bones.
 - Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
 - Harvesting shows up once the Abyssal realm is unlocked.
+
+## Combat
+
+Combat skills train by fighting, with the gear you have on. The queue picks the fight with the best XP per hour that's safe while you're away. Safe means you have food equipped, auto eat starts above the monster's biggest hit (special attacks and the combat triangle included), and the monster can't take half your HP in one hit. If your food gets low, the queue stops before it runs out.
+
+- It sets the attack style that trains your skill, like Slash for Strength, and puts your own style back when the step ends.
+- Attack and Strength need a melee weapon, Ranged needs a bow and ammo, and Magic needs a magic weapon and a combat spell selected. Defence, Hitpoints, Prayer and Slayer work with whatever you have on.
+- Prayer turns on your best prayer for the fight and stops when you run out of prayer points.
+- Slayer fights in Slayer areas you can enter, or on your current Slayer task. It never picks a new task for you.
+- If you start a fight yourself while the queue is running, it pauses and leaves your fight alone.
 
 ## Reach a level
 
