@@ -19,13 +19,17 @@ Some recipes need things the queue can't gather or craft, like feathers, herbs o
 
 ## Skills it can train
 
-Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic and Harvesting, plus the combat skills: Attack, Strength, Defence, Hitpoints, Ranged, Prayer and Slayer.
+Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic, Agility, Farming, Cartography, Archaeology and Harvesting, plus the combat skills: Attack, Strength, Defence, Hitpoints, Ranged, Prayer and Slayer. Township isn't here, since it trains through Township itself.
 
 - Firemaking, Thieving and Astrology don't make anything you'd ask for, so they only take level goals. Firemaking cuts the logs it needs first.
 - Thieving can hurt you when a pickpocket fails, so the queue only thieves when it's safe while you're away. That means food equipped and auto eat set to start above the target's biggest hit. If your food runs out, the queue stops.
 - Summoning shards come from the shop, so the queue uses the shards in your bank and plans around them. The same goes for anything else it can't get itself, like feathers or bones.
 - Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
 - Harvesting shows up once the Abyssal realm is unlocked.
+- Farming plants on the plots you've unlocked with seeds you own, waits for the crops and harvests them. It never buys seeds, plots or compost, and it plants a few extra to cover crops that die. Herbs for Herblore can come from Farming once you've unlocked Herb plots.
+- Agility runs the course you've built. It never builds obstacles for you.
+- Cartography trains by making paper from logs. Surveying the map is still up to you.
+- Archaeology digs at sites where you have a map with charges and your tools picked. Maps come from Cartography and aren't made for you.
 
 ## Combat
 
