@@ -27,9 +27,18 @@ Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafti
 - Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
 - Harvesting shows up once the Abyssal realm is unlocked.
 - Farming plants on the plots you've unlocked with seeds you own, waits for the crops and harvests them. It never buys seeds, plots or compost, and it plants a few extra to cover crops that die. Herbs for Herblore can come from Farming once you've unlocked Herb plots.
-- Agility runs the course you've built. It never builds obstacles for you.
+- Agility runs the course you've built, and can build it for you too. See below.
 - Cartography trains by making paper from logs. Surveying the map is still up to you.
 - Archaeology digs at sites where you have a map with charges and your tools picked. Maps come from Cartography and aren't made for you.
+
+## Agility course builder
+
+Pick Agility in the Train window and it shows which empty slots it can fill, with a Build my course button. An Agility goal fills them first too, before it runs the course.
+
+- For each empty slot you've unlocked, it picks the obstacle with the most XP per second that you meet the requirements for and that has no negative bonus.
+- Nothing gets built until you say so. When the queue reaches a build step, a window shows the obstacle, its cost and its bonuses, and the queue waits for you to press Build or Skip. A slot you skip stays empty for that goal.
+- If an obstacle needs items, like logs, the queue gathers them first. GP has to be in your bank already.
+- It never replaces an obstacle you've built.
 
 ## Combat
 
