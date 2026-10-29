@@ -177,7 +177,8 @@ export function setup(ctx) {
     need: () => (s.canExcavate?.(site) ? null : `needs a map for ${nm(site)} with charges, and your tools picked (maps come from Cartography)`),
     check: () => (site.selectedMap?.charges > 0 ? null : { why: `the ${nm(site)} map is out of charges` }), start: () => s.startDigging(site),
   });
-  // Agility runs the course you've built; a lap gives the XP of every obstacle. It never builds anything.
+  // Agility runs the course you've built; a lap gives the XP of every obstacle. The course builder below fills empty slots.
+  const AGILITY = "melvorD:Agility";
   const agilityMethods = (s) => {
     const built = () => [...(s.activeCourse?.builtObstacles?.values?.() ?? [])];
     return [method(s, { id: "agility:course", name: "Run your course", media: s.media }, {
@@ -188,6 +189,39 @@ export function setup(ctx) {
       start: () => s.startAgilityOnClick(),
     })];
   };
+  // ---------- Agility course builder ----------
+  // For each empty slot you've unlocked: the obstacle with the most XP per second of lap time that meets its requirements, has no
+  // negative bonus, costs GP you have and items you own or the queue can gather. Nothing is built until you confirm it,
+  // obstacles you built are never replaced, and a slot you skip stays empty for that goal.
+  const buildCosts = (o) => { const c = game.agility.getObstacleBuildCosts(o); return { c, items: c.getItemQuantityArray(), cur: c.getCurrencyQuantityArray() }; };
+  const agilityPicks = (skip = []) => {
+    const ag = game.agility, course = ag?.activeCourse, picks = [];
+    (course?.obstacleSlots ?? []).forEach((slot, i) => {
+      if (!ag.isSlotUnlocked(slot) || course.builtObstacles.has(i) || skip.includes(i)) return;
+      const ok = list(ag.actions).filter((o) => o.category === i && (o.realm?.id ?? MELVOR) === (course.realm?.id ?? MELVOR) && game.checkRequirements(o.skillRequirements ?? []) && !(o.modifiers ?? []).some((v) => v.isNegative)).map((o) => ({ o, slot: i, ...buildCosts(o), xpSec: (o.baseExperience ?? 0) / ((ag.getObstacleInterval?.(o) ?? o.baseInterval) / 1000) }))
+        .filter((x) => x.cur.every((k) => (k.currency.amount ?? 0) >= k.quantity) && x.items.every((k) => owned(k.item) >= k.quantity || isFinite(makeTime(k.item, k.quantity).ms)));
+      const best = ok.sort((a, b) => b.xpSec - a.xpSec)[0];
+      if (best) picks.push(best);
+    });
+    return picks;
+  };
+  const costText = (x) => [...x.cur.map((k) => `${num(k.quantity)} ${nm(k.currency)}`), ...x.items.map((k) => `${num(k.quantity)} ${nm(k.item)}`)].join(" + ") || "free";
+  // the queue steps for a set of picks: gather the items, then a build step each
+  const buildSteps = (picks, parent) => picks.flatMap((x) => [...(materialSteps(x.items, 1, parent) ?? []),
+    { kind: "build", skillId: AGILITY, actionId: x.o.id, slot: x.slot, qty: 1, parent, label: `Agility: build ${nm(x.o)}` }]);
+  // the confirm window; the answer is kept on the step and the queue carries on
+  const askBuild = (e, o) => {
+    const x = { o, ...buildCosts(o) }, slot = game.agility.activeCourse.obstacleSlots[o.category];
+    const mods = (o.modifiers ?? []).map((v) => { try { return v.getDescription().description; } catch (err) { return ""; } }).filter(Boolean);
+    SwalLocale.fire({
+      title: "Build an Agility obstacle?", width: 560, showCancelButton: true, confirmButtonText: "Build", cancelButtonText: "Skip",
+      html: `<div class="text-center font-size-sm mst-th-pop">` + step(`<div class="mst-title">${icon(o)}<b>${esc(nm(o))}</b></div>` +
+        chips(chip(`Slot ${o.category + 1} (Agility level ${slot?.level ?? 1})`), chip(`${num(o.baseExperience ?? 0)} XP per lap`), chip(`${num((o.baseInterval ?? 0) / 1000)} s`)) +
+        chips(chip("<b>Costs</b>", "lbl"), chip(esc(costText(x)))) + (mods.length ? chips(chip("<b>Bonuses</b>", "lbl"), ...mods.map((d) => chip(esc(d), "ok"))) : "")) +
+        note("Building can't be undone. Skip leaves this slot empty for this goal.") + `</div>`,
+    })?.then?.((r) => { e.answer = r?.isConfirmed ? "build" : r?.dismiss === "cancel" ? "skip" : undefined; e.asking = false; Queue.save(); if (e.answer) Runner.start(); });
+  };
+
   // Cartography trains here by making paper from logs. Surveying the map stays with you.
   const cartographyMethods = (s) => list(s.paperRecipes).filter(realmOk).map((r) => method(s, r, {
     get options() { return [{ costs: (r.costs?.items ?? []).filter((k) => k?.item), mult: 1 }]; },
@@ -438,14 +472,14 @@ export function setup(ctx) {
   // ---------- queue (saved locally, one list per character name) ----------
   // gather and craft run a game action until you have more of an item, skill runs one until it has given enough XP,
   // manual waits for the player, train plans the next batch of steps
-  const KINDS = new Set(["gather", "craft", "skill", "manual", "train"]);
+  const KINDS = new Set(["gather", "craft", "skill", "manual", "train", "build"]);
   const Queue = {
     items: [],
     key: () => `mst-th-queue:${game.characterName ?? "default"}`,
     load() {
       try { this.items = JSON.parse(stored(this.key()) ?? "[]").filter((e) => KINDS.has(e.kind)); } catch (e) { this.items = []; }
       // the runner never survives a reload, so nothing is "in progress" any more (progress counts are kept)
-      for (const e of this.items) { if (["active", "waiting", "blocked"].includes(e.status)) e.status = "pending"; for (const k of ["reason", "ack", "t0", "g0"]) delete e[k]; }
+      for (const e of this.items) { if (["active", "waiting", "blocked"].includes(e.status)) e.status = "pending"; for (const k of ["reason", "ack", "t0", "g0", "asking"]) delete e[k]; }
       updateBadge();
     },
     save() { if (!store(this.key(), JSON.stringify(this.items))) console.warn(TAG, "could not save queue"); updateBadge(); Panel.render(); },
@@ -508,7 +542,7 @@ export function setup(ctx) {
 
   // ---------- time estimates (base speeds; the active entry switches to its measured speed after a few seconds) ----------
   const estimateMs = (e) => {
-    if (e.kind === "manual" || e.status === "done") return 0;
+    if (e.kind === "manual" || e.kind === "build" || e.status === "done") return 0;
     if (e.kind === "train") return trainEstimate(e);
     const units = Math.max(0, e.qty - Runner.gained(e));
     if (units <= 0) return 0;
@@ -568,6 +602,7 @@ export function setup(ctx) {
       const cur = this.current();
       if (!cur) return this.setState("idle", "Nothing to run: the queue is empty or finished.");
       if (cur.kind === "manual" && cur.status === "waiting") cur.ack = true;
+      if (cur.kind === "build") cur.asking = false;
       if (this.state === "idle") this.elapsed = 0;
       Object.assign(this, { state: "running", message: "" }).step();
       Panel.render();
@@ -625,6 +660,22 @@ export function setup(ctx) {
           cur.now = nb.note; if (nb.to !== undefined) cur.afterLevel = nb.to;
           Queue.insertBefore(cur.id, nb.entries);
           continue;
+        }
+
+        // a build step asks you, then builds or skips
+        if (cur.kind === "build") {
+          const ag = game.agility, o = list(ag?.actions).find((x) => x.id === cur.actionId), parent = Queue.items.find((x) => x.id === cur.parent);
+          this.leave();
+          if (!o) return this.block(cur, "this obstacle wasn't found in your game version");
+          const there = o.course?.builtObstacles?.get(o.category) ?? ag.activeCourse.builtObstacles.get(o.category);
+          if (there) { cur.sold = there === o ? "Already built" : `Slot already has ${nm(there)}`; this.finish(cur); continue; }
+          if (cur.answer === "skip") { if (parent) parent.noBuild = [...(parent.noBuild ?? []), o.category]; cur.sold = "Skipped"; this.finish(cur); continue; }
+          if (!ag.getObstacleBuildCosts(o).checkIfOwned()) return this.block(cur, `you can't pay for ${nm(o)} right now (${costText({ o, ...buildCosts(o) })})`);
+          if (cur.answer === "build") { ag.buildObstacle(o); cur.sold = "Built"; this.finish(cur); continue; }
+          if (!cur.asking) { cur.asking = true; askBuild(cur, o); }
+          cur.status = "waiting";
+          Queue.save();
+          return this.setState("paused", `Your turn: confirm building ${nm(o)}, or skip it.`);
         }
 
         // a different entry is now on top (we just started, or something was added above): switch to it
@@ -810,6 +861,9 @@ export function setup(ctx) {
   const nextBatch = (e) => {
     const skill = skillById(e.skillId);
     if (!skill) return fail("this skill wasn't found in your game version");
+    // an Agility goal fills the empty slots of your course first (you confirm each obstacle)
+    const picks = skill.id === AGILITY && !e.forced ? agilityPicks(e.noBuild) : [];
+    if (picks.length) return { ok: true, entries: buildSteps(picks, e.id), note: `building your course first (${plural(picks.length, "obstacle")})` };
     const dt = !e.forced && !e.noDetour && bestDetour(skill, e.targetLevel);
     if (dt && (skillById(dt.skill.id)?.level ?? 0) < dt.level) return {
       ok: true,
@@ -902,16 +956,29 @@ export function setup(ctx) {
       chips(chip(`About ${fmtDur(rowsMs(rows))}`, "ok", "Base speed, counting what your bank already holds"), chip(`${num(xp)} ${esc(nm(sk))} XP`, "", "Base XP, before bonuses")));
     return { html: dupHtml(entries) + head + itemSection(rows), entries };
   };
+  // Agility: the obstacles the builder would add, with a button that queues them
+  const courseHtml = (picks) => !picks.length ? "" : step(`<div class="mst-stepno">Your course</div><div class="mst-title"><b>${plural(picks.length, "empty slot")} can be filled</b></div>` +
+    picks.map((x) => chips(chip(`${icon(x.o)}Slot ${x.slot + 1}: ${esc(nm(x.o))}`), chip(`${num(Math.round(x.xpSec * 3600))} XP/hour`), chip(esc(costText(x))))).join("") +
+    chips('<button type="button" class="btn btn-sm btn-success" data-mst-build><i class="fa fa-hammer mr-1"></i>Build my course</button>') +
+    note("Each obstacle asks you to confirm before anything is spent. An Agility goal builds them first too."));
+  const queueBuild = () => {
+    const picks = agilityPicks();
+    if (!picks.length) return tellPlayer("Your course has no empty slots the builder can fill right now.");
+    if (addUnique(buildSteps(picks), false)) tellPlayer(`Added ${plural(picks.length, "obstacle")} to build. You'll confirm each one before anything is spent.`);
+    Panel.open();
+  };
   const trainLevel = (sk) => {
     const cap = levelCap(sk), L = Math.floor(TS.level || 0);
     if (!(L > sk.level) || L > cap) return nothing(sk.level >= cap ? `${nm(sk)} is already at its highest level.` : `Pick a target level between ${sk.level + 1} and ${cap}.`);
-    const plan = trainPlan(sk, L, TS.forced || null);
+    const plan = trainPlan(sk, L, TS.forced || null), picks = sk.id === AGILITY && !TS.forced ? agilityPicks() : [];
+    const goal = [{ kind: "train", skillId: sk.id, targetLevel: L, targetXp: xpAt(L), qty: xpAt(L), forced: TS.forced || undefined, sellMade: TS.sell, label: `${nm(sk)}: reach level ${L}` }];
+    // an empty course can still take a goal: it builds first, then runs
+    if (!plan.batches.length && picks.length) return { html: dupHtml(goal) + courseHtml(picks) + note("Your course is empty, so this goal builds it first and then runs it."), entries: goal };
     if (!plan.batches.length) {
       const why = blockedWhy(sk), msg = why ? `Nothing here can be trained right now: ${why}.` : "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
       return nothing(msg, step(chips(chip(`${warnIcon}${esc(msg)}`, "warn"))));
     }
-    const entries = [{ kind: "train", skillId: sk.id, targetLevel: L, targetXp: xpAt(L), qty: xpAt(L), forced: TS.forced || undefined, sellMade: TS.sell, label: `${nm(sk)}: reach level ${L}` }];
-    const dt = !TS.forced && bestDetour(sk, L);
+    const entries = goal, dt = !TS.forced && bestDetour(sk, L);
     const time = dt ? chip(`About ${fmtDur(dt.T1)}`, "ok", `Includes training ${esc(nm(dt.skill))} first`)
       : plan.blocked == null ? chip(`About ${fmtDur(plan.totalMs)}`, "ok", "Base speeds, gathering the materials included") : chip(`Plan covers up to level ${plan.blocked}`, "warn");
     let html = dupHtml(entries) + step(`<div class="mst-title">${icon(sk)}<b>${esc(nm(sk))}: level ${sk.level} to ${L}</b></div>` + chips(chip(`${num(Math.max(0, Math.ceil(xpAt(L) - (sk.xp ?? 0))))} XP to go`), time));
@@ -925,6 +992,7 @@ export function setup(ctx) {
     }).join("");
     const okIds = !TS.forced && new Set(trainCands(sk).map((c) => c.a.id));
     const skipped = okIds && methodsOf(sk).some((m) => m.level <= sk.level && m.xp > 0 && m.safe?.().ok !== false && !okIds.has(m.id) && xpRate(m) > plan.batches[0].c.rate);
+    html += courseHtml(picks);
     html += note("Methods are ranked by XP per hour including the time to gather what they need, so it won't farm a mountain of materials for little XP. The queue re-checks your level and bank after every batch." +
       (skipped ? " Some faster methods are left out because their materials need higher levels in other skills, or come from the shop or monsters." : ""));
     return { html, entries };
@@ -968,7 +1036,10 @@ export function setup(ctx) {
       confirmButtonText: "Close", showDenyButton: true, denyButtonText: '<i class="fa fa-play mr-1"></i>Add to queue',
       showCancelButton: true, cancelButtonText: '<i class="fa fa-arrow-up mr-1"></i>Add to top',
       customClass: { popup: "mst-swal", confirmButton: "btn btn-primary m-1", denyButton: "btn btn-success m-1", cancelButton: "btn btn-warning m-1" },
-      didOpen: (popup) => { for (const t of ["input", "change"]) popup.addEventListener(t, (ev) => onTrainEvent(popup, ev)); },
+      didOpen: (popup) => {
+        for (const t of ["input", "change"]) popup.addEventListener(t, (ev) => onTrainEvent(popup, ev));
+        popup.addEventListener("click", (ev) => { if (ev.target.closest?.("[data-mst-build]")) { queueBuild(); const prev = popup.querySelector("#mst-tr-prev"); if (prev) prev.innerHTML = trainBuild().html; } });
+      },
       width: 620,
     })?.then?.((r) => { try { if (r?.isDenied) trainQueue(false); else if (r?.dismiss === "cancel") trainQueue(true); } catch (e) { console.warn(TAG, e); } });
   };
@@ -1043,14 +1114,15 @@ export function setup(ctx) {
         : '<i class="fa fa-circle mr-2" style="opacity:.25;font-size:8px;vertical-align:middle"></i>';
       const showProgress = !manual && !done && e.startQty !== undefined && (e.status === "active" || e.status === "blocked" || Runner.gained(e) > 0);
       const xpUnit = e.kind === "skill" ? " XP" : "";
-      const amount = isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}${xpUnit}` : e.kind === "skill" ? `${num(e.qty)} XP` : `x${num(e.qty)}`;
+      const amount = e.kind === "build" ? "" : isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}${xpUnit}` : e.kind === "skill" ? `${num(e.qty)} XP` : `x${num(e.qty)}`;
       const btn = (act, ic, title, cls = "text-white-50") => `<a data-act="${act}" data-id="${esc(e.id)}" class="pointer-enabled ${cls} ml-2" title="${title}"><i class="fa ${ic}"></i></a>`;
       const sub = done && e.sold ? small("text-muted", esc(e.sold)) : e.reason ? small("text-warning", esc(e.reason))
         : issue ? small("text-warning", `<i class="fa fa-exclamation-triangle"></i> ${esc(issue)}`)
         : isTrain && e.now && !done ? small("text-muted", `now: ${esc(e.now)}`)
-        : manual && !done ? small("text-muted", `do this yourself${e.status === "waiting" ? " (waiting for you)" : ""}`) : "";
+        : manual && !done ? small("text-muted", `do this yourself${e.status === "waiting" ? " (waiting for you)" : ""}`)
+        : e.kind === "build" && !done ? small("text-muted", e.status === "waiting" ? "waiting for you to confirm" : "asks you before building") : "";
       return `<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07);${done ? "opacity:.5" : ""}" ${manual ? `title="${esc(e.note ?? "")}"` : ""}>` +
-        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : e.kind === "skill" ? methodById(skillById(e.skillId), e.actionId) ?? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
+        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : e.kind === "build" ? list(game.agility?.actions).find((x) => x.id === e.actionId) : e.kind === "skill" ? methodById(skillById(e.skillId), e.actionId) ?? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
         `${Runner.focusId === e.id ? ' <span class="badge badge-success">first</span>' : ""}${sub}</div>` +
         (done ? btn("remove", "fa-times", "Remove") : btn("first", "fa-play-circle", "Do this first (keeps its place in the list)", "text-success") +
           btn("top", "fa-angle-double-up", "Move to top") + btn("up", "fa-arrow-up", "Move up") + btn("down", "fa-arrow-down", "Move down") + btn("remove", "fa-times", "Remove")) + `</div>`;
