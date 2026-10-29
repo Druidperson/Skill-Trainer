@@ -6,5 +6,6 @@
 - Thieving only runs when it's safe while you're away, and stops if your food runs out.
 - Combat skills: Attack, Strength, Defence, Hitpoints, Ranged, Magic, Prayer and Slayer. It only picks fights that are safe while you're away, sets the right attack style for each step and puts yours back after.
 - Uses what's in your bank for things the queue can't get itself, like Summoning shards and feathers.
+- Farming plants, waits and harvests with your own seeds and plots. Agility runs your course, Cartography makes paper and Archaeology digs where you have a map.
 - Looks ahead across skills, counts burnt food, restocks when a craft runs short, and has a Prefer mastery XP setting.
 - Has its own queue, panel and settings, so it runs next to Township Task Helper without sharing a queue.

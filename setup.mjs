@@ -52,9 +52,11 @@ export function setup(ctx) {
   // player does themselves, unless the bank already holds enough of it.
   const COMBAT = new Set(["Attack", "Strength", "Defence", "Hitpoints", "Ranged", "Magic", "Prayer", "Slayer"].map((s) => "melvorD:" + s));
   const TRAINABLE = new Set(["Woodcutting", "Mining", "Fishing", "Cooking", "Smithing", "Fletching", "Crafting", "Runecrafting", "Herblore",
-    "Firemaking", "Thieving", "Summoning", "Astrology"].map((s) => "melvorD:" + s).concat("melvorItA:Harvesting", ...COMBAT));
+    "Firemaking", "Thieving", "Summoning", "Astrology", "Agility", "Farming"].map((s) => "melvorD:" + s).concat("melvorItA:Harvesting", "melvorAoD:Archaeology", "melvorAoD:Cartography", ...COMBAT));
   const isTrainable = (s) => !!s && TRAINABLE.has(s.id);
-  const MAGIC = "melvorD:Magic", MELVOR = "melvorD:Melvor";
+  const MAGIC = "melvorD:Magic", FARMING = "melvorD:Farming", MELVOR = "melvorD:Melvor";
+  // skills that only count as a source for things no other skill makes (Bone Offering makes Bones, Farming grows trees)
+  const EXTRA = new Set([MAGIC, FARMING]);
   // actions from another realm only count once that realm is unlocked and they give normal XP
   const realmOk = (a) => !a.realm || a.realm.id === MELVOR || (a.realm.isUnlocked === true && (a.baseExperience ?? 0) > 0);
   const MANUAL_NOTE = "Skill Trainer can't get this on its own, so it's a step you do yourself";
@@ -129,6 +131,71 @@ export function setup(ctx) {
       start: (e) => { s.selectRecipeOnClick(a); s.selectNonShardCostOnClick?.(e.altIndex ?? 0); if (!s.isActive) s.createButtonOnClick(); },
     }),
   };
+  // ---------- Farming: plant, wait for the crop to grow, harvest ----------
+  // Farming has no action to start. Crops grow on real-time timers, so a Farming step plants what it needs on the plots
+  // you've unlocked, with seeds you own, waits, and harvests. One planting is one attempt; plots grow side by side.
+  const PLOT = { empty: 1, growing: 2, grown: 3, dead: 4 };
+  const openPlots = (f, r) => { let p = []; try { p = [...(f.getPlotsForCategory(r.category) ?? [])]; } catch (e) { /* use the list */ } return (p.length ? p : list(f.plots).filter((x) => x.category === r.category)).filter((x) => x.state !== 0); };
+  const growMs = (f, r) => { try { return f.modifyInterval(r.baseInterval, r) || r.baseInterval; } catch (e) { return r.baseInterval; } };
+  const seedCost = (f, r) => { try { return f.getRecipeSeedCost(r); } catch (e) { return r.seedCost?.quantity ?? 1; } };
+  // without compost a crop only grows about half the time, and a dead crop gives nothing
+  const cropChance = (f, r) => { try { return Math.min(1, Math.max(0.05, f.getPlotGrowthChance({ compostLevel: 0, plantedRecipe: r }) / 100)); } catch (e) { return 1; } };
+  const farmTick = (f, r, e) => {
+    const plots = openPlots(f, r), mine = (p) => p.plantedRecipe === r, m = methodById(f, r.id);
+    if (!plots.length) return { block: `you haven't unlocked any ${nm(r.category)} plots yet` };
+    for (const p of plots) if (mine(p) && p.state === PLOT.dead) f.clearDeadPlot(p);
+    for (const p of plots) if (mine(p) && p.state === PLOT.grown) f.harvestPlot(p);
+    const left = e.qty - Runner.gained(e), growing = plots.filter((p) => mine(p) && p.state === PLOT.growing).length;
+    if (left <= 0) return {};
+    const want = Math.ceil(left / Math.max(1e-9, e.kind === "skill" ? m.xp * m.succ : Math.max(1, m.qty) * m.succ)) - growing;
+    if (want > 0) {
+      const empty = plots.filter((p) => p.state === PLOT.empty), cost = seedCost(f, r), seeds = owned(r.seedCost.item);
+      const n = Math.min(want, empty.length, Math.floor(seeds / cost)), timers = new Map();
+      // the game starts one growth timer per planting time, the same way its own Plant All button does
+      for (const p of empty.slice(0, n)) { const t = f.plantPlot(p, r); if (t > 0 && p.state === PLOT.growing) timers.set(t, [...(timers.get(t) ?? []), p]); }
+      timers.forEach((ps, t) => f.createGrowthTimer(ps, t));
+      if (n === 0 && !growing) return { block: empty.length ? `needs ${cost} ${nm(r.seedCost.item)} to plant ${nm(r)} and you have ${seeds}` : `all your ${nm(r.category)} plots are busy with other crops. Harvest or clear them` };
+    }
+    const now = plots.filter((p) => mine(p) && p.state === PLOT.growing);
+    if (!now.length) return {};
+    const ms = Math.max(...now.map((p) => { try { return f.getPlotGrowthTime(p); } catch (err) { return 0; } }));
+    return { note: `Waiting for ${nm(r)} to grow: ${plural(now.length, "plot")} planted, ready in ${fmtDur(ms)}` };
+  };
+  SKILLS[FARMING] = (s, r) => method(s, r, {
+    get options() { return [{ costs: r.seedCost?.item ? [{ item: r.seedCost.item, quantity: seedCost(s, r) }] : [], mult: 1 }]; },
+    get succ() { return cropChance(s, r); },
+    // XP per planting: base XP when planted (for some kinds), then base XP per crop (or once) when a grown crop is harvested.
+    // The planner counts xp x succ as the average, so the planting part is divided back out.
+    get xp() { const b = r.baseExperience ?? 0; return (r.category?.giveXPOnPlant ? b / this.succ : 0) + b * (r.category?.scaleXPWithQuantity ? r.baseQuantity ?? 1 : 1); },
+    get ms() { const n = openPlots(s, r).length; return n ? growMs(s, r) / n : Infinity; },
+    need: () => (openPlots(s, r).length ? null : `needs an unlocked ${nm(r.category)} plot`),
+    tick: (e) => farmTick(s, r, e), start: () => fail("Farming steps plant and harvest instead"),
+  });
+  // Archaeology digs at sites that have a map with charges and tools picked. Maps come from Cartography and aren't made here.
+  SKILLS["melvorAoD:Archaeology"] = (s, site) => method(s, site, {
+    product: null, options: NO_COSTS, get xp() { return s.getBaseSkillXPForDigSite?.(site) ?? 0; }, get ms() { return s.getDigSiteInterval?.(site) ?? intervalMs(s, site); },
+    need: () => (s.canExcavate?.(site) ? null : `needs a map for ${nm(site)} with charges, and your tools picked (maps come from Cartography)`),
+    check: () => (site.selectedMap?.charges > 0 ? null : { why: `the ${nm(site)} map is out of charges` }), start: () => s.startDigging(site),
+  });
+  // Agility runs the course you've built; a lap gives the XP of every obstacle. It never builds anything.
+  const agilityMethods = (s) => {
+    const built = () => [...(s.activeCourse?.builtObstacles?.values?.() ?? [])];
+    return [method(s, { id: "agility:course", name: "Run your course", media: s.media }, {
+      product: null, options: NO_COSTS, level: 1, noMastery: true,
+      get xp() { return built().reduce((t, o) => t + (o.baseExperience ?? 0), 0); },
+      get ms() { const o = built(); return o.length ? o.reduce((t, x) => t + (s.getObstacleInterval?.(x) ?? x.baseInterval ?? 3000), 0) : Infinity; },
+      need: () => (s.activeCourse?.builtObstacles?.has?.(0) ? null : "build at least the first obstacle of your Agility course"),
+      start: () => s.startAgilityOnClick(),
+    })];
+  };
+  // Cartography trains here by making paper from logs. Surveying the map stays with you.
+  const cartographyMethods = (s) => list(s.paperRecipes).filter(realmOk).map((r) => method(s, r, {
+    get options() { return [{ costs: (r.costs?.items ?? []).filter((k) => k?.item), mult: 1 }]; },
+    get ms() { return s.getPaperMakingInterval?.(r) ?? s.BASE_PAPER_MAKING_INTERVAL ?? 5000; },
+    start: () => { s.selectPaperRecipeOnClick(r); if (!s.isActive) s.makePaperOnClick(); },
+  }));
+  const WHOLE = { [MAGIC]: (s) => magicMethods(s), "melvorD:Agility": agilityMethods, "melvorAoD:Cartography": cartographyMethods };
+
   // ---------- combat ----------
   // A fight trains the skill your attack style gives XP in: 4 XP per point of damage (split on Longrange and Defensive), and
   // 1.33 Hitpoints XP on top. Prayer XP comes from an active prayer, Slayer XP from Slayer areas (half the monster's HP) and
@@ -260,7 +327,7 @@ export function setup(ctx) {
   const methodsOf = (skill) => {
     if (!skill) return [];
     if (!methodCache.has(skill.id)) {
-      const own = skill.id === MAGIC ? magicMethods(skill) : list(skill.actions).filter(realmOk).map((a) => (SKILLS[skill.id] ?? method)(skill, a));
+      const own = WHOLE[skill.id] ? WHOLE[skill.id](skill) : list(skill.actions).filter(realmOk).map((a) => (SKILLS[skill.id] ?? method)(skill, a));
       methodCache.set(skill.id, COMBAT.has(skill.id) ? [...own, ...fightMethods(skill)] : own);
     }
     return methodCache.get(skill.id);
@@ -274,14 +341,15 @@ export function setup(ctx) {
     if (idx) return idx;
     idx = { crafters: new Map(), gatherers: new Map() };
     const add = (m) => { const map = m.options[0].costs.length ? idx.crafters : idx.gatherers; map.set(m.product.id, [...(map.get(m.product.id) ?? []), { skill: m.skill, a: m }]); };
-    const skills = list(game.skills).filter(isTrainable);
-    for (const m of skills.filter((s) => s.id !== MAGIC).flatMap(methodsOf)) if (m.product) add(m);
-    for (const m of skills.filter((s) => s.id === MAGIC).flatMap(methodsOf)) if (m.product && !m.own && !idx.crafters.has(m.product.id) && !idx.gatherers.has(m.product.id)) add(m);
+    const skills = list(game.skills).filter(isTrainable), known = (id) => idx.crafters.has(id) || idx.gatherers.has(id);
+    for (const m of skills.filter((s) => !EXTRA.has(s.id)).flatMap(methodsOf)) if (m.product) add(m);
+    for (const m of skills.filter((s) => EXTRA.has(s.id)).flatMap(methodsOf).filter((m) => m.product && !m.own && !known(m.product.id))) add(m);
     return idx;
   };
-  // Magic is an extra source (Bone Offering makes Bones), so it only counts once you have the level for it
-  const crafter = (id) => { const c = index().crafters.get(id)?.[0]; return c && c.skill.id === MAGIC && c.a.level > c.skill.level ? undefined : c; };
-  const gatherer = (id) => index().gatherers.get(id)?.[0];
+  // an extra source only counts once you can use it (the level, an unlocked plot); until then the item is a step you do yourself
+  const usable = (x) => (x && EXTRA.has(x.skill.id) && (x.a.level > x.skill.level || x.a.need?.()) ? undefined : x);
+  const crafter = (id) => usable(index().crafters.get(id)?.[0]);
+  const gatherer = (id) => usable(index().gatherers.get(id)?.[0]);
 
   // ---------- breaking an item down into steps ----------
   // Crafts break down into their materials. Parents come before children, so what the bank already holds is used first.
@@ -314,7 +382,7 @@ export function setup(ctx) {
   const lvlChip = (skill, a) => (skill && lvl(a) > skill.level ? chip(`${warnIcon}Needs ${esc(nm(skill))} level ${a.level} (you have ${skill.level})`, "warn") : "");
   // the easiest way to gather an item the player can't gather yet (null if they can, or if no skill gathers it)
   const gatherBlock = (id) => {
-    const opts = index().gatherers.get(id) ?? [];
+    const opts = (index().gatherers.get(id) ?? []).filter((x) => !EXTRA.has(x.skill.id));
     if (!opts.length || opts.some((x) => lvl(x.a) <= x.skill.level)) return null;
     return opts.reduce((m, x) => (lvl(x.a) - x.skill.level < lvl(m.a) - m.skill.level ? x : m));
   };
@@ -341,9 +409,9 @@ export function setup(ctx) {
         body = chips(chip(`Level ${lvl(c.a)}`), chip(plural(crafts, "craft")), haveChip, alts > 0 ? chip(plural(alts, "other option")) : "") +
           (uses.length ? chips(chip("<b>Uses</b>", "lbl"), ...uses) : "") + (lvlChip(c.skill, c.a) ? chips(lvlChip(c.skill, c.a)) : "");
       } else {
-        const g = index().gatherers.get(n.item.id), lb = gatherBlock(n.item.id);
+        const g = (index().gatherers.get(n.item.id) ?? []).filter(usable), lb = gatherBlock(n.item.id);
         title = `${icon(n.item)}<b>${esc(nm(n.item))}</b> &times;${num(n.qty)}`;
-        body = chips(haveChip) + (g
+        body = chips(haveChip) + (g.length
           ? chips(chip(`<i class="fa fa-hand-paper"></i> <b>Gather</b>`, "lbl"), ...g.slice(0, 3).map((x) => chip(`${esc(nm(x.skill))}: ${esc(nm(x.a))} (Lv ${lvl(x.a)})`))) + (lb ? chips(lvlChip(lb.skill, lb.a)) : "")
           : chips(chip(MANUAL_NOTE, "warn")));
       }
@@ -454,7 +522,7 @@ export function setup(ctx) {
     }
     return units * per;
   };
-  const fmtDur = (ms) => { const m = Math.round(ms / 60000); return m < 1 ? "under 1 min" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+  const fmtDur = (ms) => { if (!isFinite(ms)) return "an unknown time"; const m = Math.round(ms / 60000); return m < 1 ? "under 1 min" : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
   const fmtClock = (ms) => {
     const d = new Date(Date.now() + ms), t = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     return d.toDateString() === new Date().toDateString() ? t : `${d.toLocaleDateString([], { weekday: "short" })} ${t}`;
@@ -566,7 +634,7 @@ export function setup(ctx) {
           cur.status = "active"; delete cur.reason;
           if (cur.kind !== "manual" && cur.startQty === undefined) cur.startQty = this.value(cur);
           Queue.save();
-          if (cur.kind !== "manual") {
+          if (cur.kind !== "manual" && !methodById(skillById(cur.skillId), cur.actionId)?.tick) {
             const r = startAction(cur);
             // a step with no materials is handled below: it adds the steps to get them
             if (!r.ok && !r.noMaterials) return r.transient ? this.wait(r.reason) : this.block(cur, r.reason);
@@ -586,6 +654,8 @@ export function setup(ctx) {
         if (got - (cur.startQty ?? 0) >= cur.qty) { this.finish(cur); continue; }
 
         const skill = skillById(cur.skillId), m = methodById(skill, cur.actionId), safety = m?.safe?.(), chk = m?.check?.(), actor = m?.actor ?? skill;
+        // a Farming step has no action to run: it plants, waits and harvests
+        if (m?.tick) { const t = m.tick(cur); if (t.block) return this.block(cur, t.block); return this.wait(t.note ?? ""); }
         // food, runes, ammo and prayer points can run out mid-step: stop before it isn't safe any more
         if (safety && !safety.ok) return this.block(cur, `not safe while you're away: ${safety.why}`);
         if (chk && !chk.noMaterials) return this.block(cur, chk.why);
