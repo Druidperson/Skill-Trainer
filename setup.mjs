@@ -7,7 +7,7 @@ export function setup(ctx) {
   const nm = (o) => String(o?.name ?? o?._name ?? o?._localID ?? o?.id ?? "?");
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const num = (n) => Number(n).toLocaleString();
-  const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
+  const plural = (n, w, ws = w + "s") => `${num(n)} ${n === 1 ? w : ws}`;
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const icon = (o) => (typeof o?.media === "string" ? `<img class="skill-icon-xs mr-1" src="${esc(o.media)}">` : "");
   const have = (item) => { try { const q = game.bank.getQty(item); return Number.isFinite(q) ? q : null; } catch (e) { return null; } };
@@ -16,7 +16,6 @@ export function setup(ctx) {
   const stored = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
   const itemById = (id) => { try { return game.items.getObjectByID(id); } catch (e) { return null; } };
   const skillById = (id) => list(game.skills).find((s) => s.id === id);
-  const actionById = (skill, id) => list(skill?.actions).find((a) => a.id === id);
   const lvl = (a) => a.level ?? 1;
   const fail = (reason, extra) => ({ ok: false, reason, ...extra });
   const warnIcon = '<i class="fa fa-exclamation-triangle"></i>&nbsp;';
@@ -48,57 +47,129 @@ export function setup(ctx) {
   };
   const mastery = () => Settings.get("preferMastery");
 
-  // ---------- recipe index (built on first use) ----------
-  // The skills the queue can run on its own. Anything else a recipe needs (herbs, feathers, monster drops)
-  // becomes a step the player does themselves.
-  const TRAINABLE = new Set(["Woodcutting", "Mining", "Fishing", "Cooking", "Smithing", "Fletching", "Crafting", "Runecrafting", "Herblore"].map((s) => "melvorD:" + s));
+  // ---------- skills and their methods ----------
+  // The skills the queue can run on its own. Anything else a recipe needs (herbs, feathers, monster drops) becomes a step the
+  // player does themselves, unless the bank already holds enough of it.
+  const TRAINABLE = new Set(["Woodcutting", "Mining", "Fishing", "Cooking", "Smithing", "Fletching", "Crafting", "Runecrafting", "Herblore",
+    "Firemaking", "Thieving", "Summoning", "Astrology", "Magic"].map((s) => "melvorD:" + s).concat("melvorItA:Harvesting"));
   const isTrainable = (s) => !!s && TRAINABLE.has(s.id);
-  const inMelvor = (a) => !a.realm || a.realm.id === "melvorD:Melvor";
+  const MAGIC = "melvorD:Magic", MELVOR = "melvorD:Melvor";
+  // actions from another realm only count once that realm is unlocked and they give normal XP
+  const realmOk = (a) => !a.realm || a.realm.id === MELVOR || (a.realm.isUnlocked === true && (a.baseExperience ?? 0) > 0);
   const MANUAL_NOTE = "Skill Trainer can't get this on its own, so it's a step you do yourself";
+  const intervalMs = (skill, a) => a.baseInterval ?? (a.baseMinInterval !== undefined && a.baseMaxInterval !== undefined ? (a.baseMinInterval + a.baseMaxInterval) / 2 : skill.baseInterval) ?? 3000;
+  // Cooking burns some food: costs are used every attempt, but the product and the XP only come from the ones that work.
+  const succ = (skill, a) => { try { const c = skill?.id === "melvorD:Cooking" ? Number(skill.getRecipeSuccessChance(a)) : 100; if (c > 0 && c < 100) return Math.max(0.05, c / 100); } catch (e) { /* never fails */ } return 1; };
+  const baseCosts = (a) => (Array.isArray(a.itemCosts) ? a.itemCosts : []);
+  const NO_COSTS = [{ costs: [], mult: 1 }];
+  // a hit the player takes while away is safe when auto eat starts above the biggest hit and there is food to eat
+  const hitSafety = (maxHit, realm) => {
+    try {
+      const pl = game.combat.player, slot = pl.food.slots[pl.food.selectedSlot], hp = pl.stats.maxHitpoints, eat = Number(pl.autoEatThreshold) || 0;
+      const resist = !realm || realm.id === MELVOR ? Number(pl.stats.getResistance?.(game.normalDamage)) || 0 : 0;
+      const max = Math.floor((Number(maxHit) || 0) * (typeof numberMultiplier === "number" ? numberMultiplier : 10) * (1 - resist / 100));
+      if (max <= 0) return { ok: true };
+      if (max * 2 >= hp) return { ok: false, why: `it can hit for ${num(max)} against your ${num(hp)} HP` };
+      if (!slot?.item || !(slot.quantity > 0) || slot.item.id === "melvorD:Empty_Food") return { ok: false, why: "you have no food equipped" };
+      if (eat <= 0) return { ok: false, why: "auto eat is off, so nothing eats your food while the queue runs" };
+      if (eat < max) return { ok: false, why: `auto eat starts at ${num(Math.round(eat))} HP but it can hit for ${num(max)}` };
+      return { ok: true };
+    } catch (e) { return { ok: false, why: "your combat stats couldn't be read" }; }
+  };
+  // A method is one way to train: what an attempt costs (options, the first is used), what it makes (product, qty), how long it
+  // takes (ms), the XP it gives, the share of attempts that work (succ) and how to start it. Most come straight from an action.
+  const method = (skill, a, over = {}) => Object.defineProperties({
+    id: a.id, skill, a, name: nm(a), xp: a.baseExperience ?? 0,
+    get level() { return lvl(a); }, get media() { return a.media ?? this.product?.media; }, get product() { return a.product ?? null; }, get qty() { return a.baseQuantity ?? 1; },
+    get options() { return (a.alternativeCosts?.length ? a.alternativeCosts.map((o) => ({ costs: o.itemCosts ?? [], mult: o.quantityMultiplier ?? 1 })) : NO_COSTS).map((o) => ({ costs: [...baseCosts(a), ...o.costs].filter((k) => k?.item), mult: o.mult })); },
+    get succ() { return succ(skill, a); }, get ms() { return intervalMs(skill, a); },
+    start: (e) => (STARTERS[skill.id] ?? startCraft)(skill, a, e),
+  }, Object.getOwnPropertyDescriptors(over));
+  const nonShardQty = (skill, a, item) => {
+    try { const cost = item.sellsFor?.currency?.id === "melvorItA:AbyssalPieces" ? Summoning.recipeAPCost : Summoning.recipeGPCost; return skill.modifyNonShardItemCost(item, cost / Math.max(20, item.sellsFor?.quantity ?? 0), a); } catch (e) { return 1; }
+  };
+  // spells that only take runes and set items, and Superheat (ores into a bar). Spells that destroy an item you pick are left out.
+  const magicMethods = (skill) => {
+    const runes = (sp) => { try { return game.combat.player.getRuneCosts(sp); } catch (e) { return sp.runesRequired ?? []; } };
+    const cast = (sp, bar) => () => { skill.selectSpellOnClick(sp); if (bar) skill.selectBarOnClick(bar); if (!skill.isActive) skill.castButtonOnClick(); };
+    const bars = list(game.smithing?.actions).filter((r) => r.category?.id === "melvorD:Bars" && realmOk(r) && r.product);
+    return list(skill.actions).filter(realmOk).flatMap((sp) => {
+      const t = sp.specialCost?.type, fixed = sp.fixedItemCosts ?? [], base = { qty: sp.productionRatio ?? 1, ms: skill.baseInterval ?? 2000, succ: 1 };
+      if (t === -5 && sp.produces && typeof sp.produces === "object")
+        return [method(skill, sp, { ...base, product: sp.produces, get options() { return [{ costs: [...runes(sp), ...fixed], mult: 1 }]; }, start: cast(sp) })];
+      if (t !== -3 && t !== -4) return [];
+      return bars.map((r) => method(skill, sp, {
+        ...base, id: `${sp.id}|${r.id}`, name: `${nm(sp)} (${nm(r.product)})`, media: r.product.media, product: r.product, own: true, start: cast(sp, r),
+        need: (lv) => (levelIn(game.smithing, lv) >= lvl(r) ? null : `needs Smithing level ${lvl(r)}`),
+        get options() { return [{ costs: [...r.itemCosts.filter((k) => t === -3 || k.item.id !== "melvorD:Coal_Ore").map((k) => ({ item: k.item, quantity: k.quantity * (sp.specialCost.quantity ?? 1) })), ...runes(sp), ...fixed], mult: 1 }]; },
+      }));
+    });
+  };
+  // what is special about each skill's actions; skills not listed use their actions as they are
+  const SKILLS = {
+    "melvorD:Herblore": (s, a) => method(s, a, { get product() { return a.product ?? a.potions?.[Math.min(a.potions.length - 1, Math.max(0, s.getPotionTier?.(a) ?? 0))] ?? null; }, get qty() { return a.product ? a.baseQuantity ?? 1 : 1; } }),
+    "melvorD:Firemaking": (s, a) => method(s, a, { product: null, name: nm(a.log ?? a), media: a.log?.media, options: [{ costs: a.log ? [{ item: a.log, quantity: 1 }] : [], mult: 1 }] }),
+    "melvorD:Thieving": (s, a) => method(s, a, {
+      product: null, options: NO_COSTS, safe: () => hitSafety(a.maxHit, a.realm),
+      get succ() { return Math.min(1, Math.max(0.01, (Number(s.getNPCSuccessRate?.(a)) || 100) / 100)); },
+      // a failed attempt stuns you, unless you avoid the stun
+      get ms() { return (s.baseInterval ?? 3000) + (1 - this.succ) * (1 - (Number(s.stunAvoidanceChance) || 0) / 100) * (s.baseStunInterval ?? 3000); },
+      start: () => (a.area ? s.startThieving(a.area, a) : fail("no thieving area found for this target")),
+    }),
+    "melvorD:Astrology": (s, a) => method(s, a, { product: null, options: NO_COSTS, get ms() { return Number(s.getConstellationInterval?.(a)) || intervalMs(s, a); }, start: () => s.studyConstellationOnClick(a) }),
+    "melvorItA:Harvesting": (s, a) => method(s, a, { product: null, options: NO_COSTS, start: () => s.onVeinClick(a) }),
+    "melvorD:Summoning": (s, a) => method(s, a, {
+      get options() { const shards = baseCosts(a).filter((k) => k?.item), alts = a.nonShardItemCosts ?? []; return alts.length ? alts.map((item) => ({ costs: [...shards, { item, quantity: nonShardQty(s, a, item) }], mult: 1 })) : [{ costs: shards, mult: 1 }]; },
+      start: (e) => { s.selectRecipeOnClick(a); s.selectNonShardCostOnClick?.(e.altIndex ?? 0); if (!s.isActive) s.createButtonOnClick(); },
+    }),
+  };
+  const methodCache = new Map();
+  const methodsOf = (skill) => {
+    if (!skill) return [];
+    if (!methodCache.has(skill.id)) methodCache.set(skill.id, skill.id === MAGIC ? magicMethods(skill) : list(skill.actions).filter(realmOk).map((a) => (SKILLS[skill.id] ?? method)(skill, a)));
+    return methodCache.get(skill.id);
+  };
+  const methodById = (skill, id) => methodsOf(skill).find((m) => m.id === id);
+  const perAttempt = (m, opt = m.options[0]) => Math.max(1, m.qty * opt.mult) * m.succ;
+  const xpRate = (m) => (m.ms > 0 ? ((m.xp * m.succ) / m.ms) * 3600000 : 0);
+  // where each item comes from. Magic only makes what no other skill makes, so bars still come from Smithing.
   let idx = null;
   const index = () => {
     if (idx) return idx;
     idx = { crafters: new Map(), gatherers: new Map() };
-    for (const skill of list(game.skills).filter(isTrainable)) for (const a of list(skill.actions)) {
-      if (!a.product) continue;
-      const m = Array.isArray(a.itemCosts) && (a.itemCosts.length || a.alternativeCosts?.length) ? idx.crafters : idx.gatherers;
-      m.set(a.product.id, [...(m.get(a.product.id) ?? []), { skill, a }]);
-    }
+    const add = (m) => { const map = m.options[0].costs.length ? idx.crafters : idx.gatherers; map.set(m.product.id, [...(map.get(m.product.id) ?? []), { skill: m.skill, a: m }]); };
+    const skills = list(game.skills).filter(isTrainable);
+    for (const m of skills.filter((s) => s.id !== MAGIC).flatMap(methodsOf)) if (m.product) add(m);
+    for (const m of skills.filter((s) => s.id === MAGIC).flatMap(methodsOf)) if (m.product && !m.own && !idx.crafters.has(m.product.id) && !idx.gatherers.has(m.product.id)) add(m);
     return idx;
   };
-  const crafter = (id) => index().crafters.get(id)?.[0];
+  // Magic is an extra source (Bone Offering makes Bones), so it only counts once you have the level for it
+  const crafter = (id) => { const c = index().crafters.get(id)?.[0]; return c && c.skill.id === MAGIC && c.a.level > c.skill.level ? undefined : c; };
   const gatherer = (id) => index().gatherers.get(id)?.[0];
-
-  // Cooking burns some food: costs are used every attempt, but the product and the XP only come from the ones that work.
-  const succ = (skill, a) => { try { const c = skill?.id === "melvorD:Cooking" ? Number(skill.getRecipeSuccessChance(a)) : 100; if (c > 0 && c < 100) return Math.max(0.05, c / 100); } catch (e) { /* never fails */ } return 1; };
-  const options = (a) => (a.alternativeCosts?.length ? a.alternativeCosts.map((o) => ({ costs: o.itemCosts ?? [], mult: o.quantityMultiplier ?? 1 })) : [{ costs: [], mult: 1 }]);
-  const costsOf = (a, opt = options(a)[0]) => [...(Array.isArray(a.itemCosts) ? a.itemCosts : []), ...opt.costs].filter((k) => k?.item);
-  const perAttempt = (skill, a, opt = options(a)[0]) => Math.max(1, (a.baseQuantity ?? 1) * opt.mult) * succ(skill, a);
-  const intervalMs = (skill, a) => a.baseInterval ?? (a.baseMinInterval !== undefined && a.baseMaxInterval !== undefined ? (a.baseMinInterval + a.baseMaxInterval) / 2 : skill.baseInterval) ?? 3000;
-  const xpRate = (skill, a) => { const ms = intervalMs(skill, a); return ms > 0 ? (((a.baseExperience ?? 0) * succ(skill, a)) / ms) * 3600000 : 0; };
 
   // ---------- breaking an item down into steps ----------
   // Crafts break down into their materials. Parents come before children, so what the bank already holds is used first.
-  const buildRows = (item, qty, fresh = false) => {
-    const nodes = new Map();
+  const buildRows = (item, qty, fresh = false) => rowsFor([[item, qty]], fresh);
+  const rowsFor = (targets, fresh = false) => {
+    const nodes = new Map(), roots = new Set(targets.map(([it]) => it.id));
     const explode = (it, depth, path) => {
       const n = nodes.get(it.id) ?? { item: it, depth }, c = crafter(it.id);
       nodes.set(it.id, Object.assign(n, { depth: Math.max(n.depth, depth) }));
       if (!c || path.has(it.id) || depth > 12) return;
-      n.recipe = { c, opt: options(c.a)[0] };
-      path.add(it.id); for (const k of costsOf(c.a, n.recipe.opt)) explode(k.item, depth + 1, path); path.delete(it.id);
+      n.recipe = { c, opt: c.a.options[0] };
+      path.add(it.id); for (const k of n.recipe.opt.costs) explode(k.item, depth + 1, path); path.delete(it.id);
     };
-    explode(item, 0, new Set());
-    const demand = new Map([[item.id, qty]]), rows = [];
+    for (const [it] of targets) explode(it, 0, new Set());
+    const demand = new Map(targets.map(([it, q]) => [it.id, q])), rows = [];
     for (const n of [...nodes.values()].sort((a, b) => a.depth - b.depth)) {
       const need = demand.get(n.item.id) ?? 0;
       if (need <= 0) continue;
-      n.fresh = fresh && n.item.id === item.id;
+      n.fresh = fresh && roots.has(n.item.id);
       Object.assign(n, { need, qty: Math.max(0, need - (n.fresh ? 0 : owned(n.item))) });
       if (n.recipe) {
         const { c, opt } = n.recipe;
-        n.recipe.crafts = Math.ceil(n.qty / perAttempt(c.skill, c.a, opt));
-        if (n.qty > 0) for (const k of costsOf(c.a, opt)) demand.set(k.item.id, (demand.get(k.item.id) ?? 0) + k.quantity * n.recipe.crafts);
+        n.recipe.crafts = Math.ceil(n.qty / perAttempt(c.a, opt));
+        if (n.qty > 0) for (const k of opt.costs) demand.set(k.item.id, (demand.get(k.item.id) ?? 0) + k.quantity * n.recipe.crafts);
       }
       if (n.qty > 0) rows.push(n);
     }
@@ -128,8 +199,8 @@ export function setup(ctx) {
       let title, body;
       if (n.recipe) {
         const { c, opt, crafts } = n.recipe;
-        const alts = (index().crafters.get(n.item.id)?.length ?? 1) - 1 + options(c.a).length - 1;
-        const uses = costsOf(c.a, opt).map((x) => chip(`${icon(x.item)}${num(x.quantity * crafts)} ${esc(nm(x.item))}`));
+        const alts = (index().crafters.get(n.item.id)?.length ?? 1) - 1 + c.a.options.length - 1;
+        const uses = opt.costs.map((x) => chip(`${icon(x.item)}${num(x.quantity * crafts)} ${esc(nm(x.item))}`));
         title = `${icon(c.skill)}<b>${esc(nm(c.skill))}</b>: make ${icon(n.item)}<b>${esc(nm(n.item))}</b> &times;${num(n.qty)}`;
         body = chips(chip(`Level ${lvl(c.a)}`), chip(plural(crafts, "craft")), haveChip, alts > 0 ? chip(plural(alts, "other option")) : "") +
           (uses.length ? chips(chip("<b>Uses</b>", "lbl"), ...uses) : "") + (lvlChip(c.skill, c.a) ? chips(lvlChip(c.skill, c.a)) : "");
@@ -151,20 +222,19 @@ export function setup(ctx) {
     if (g) return { ...base, kind: "gather", skillId: g.skill.id, actionId: g.a.id, label: `${nm(g.skill)}: gather ${nm(n.item)}` };
     return { ...base, qty: n.need ?? n.qty, kind: "manual", label: `Get ${nm(n.item)}`, note: MANUAL_NOTE };
   });
-  // the steps that get the missing materials for `crafts` more crafts of a; null if the queue can't get one of them
-  const materialSteps = (a, opt, crafts, parent) => {
-    const entries = costsOf(a, opt).flatMap((k) => {
-      const need = k.quantity * crafts - owned(k.item);
-      return need > 0 ? toEntries(buildRows(k.item, need, true)) : [];
-    });
+  // the steps that get the missing materials for `crafts` more attempts; null if the queue can't get one of them
+  const materialSteps = (costs, crafts, parent) => {
+    const targets = costs.map((k) => [k.item, k.quantity * crafts - owned(k.item)]).filter(([, n]) => n > 0);
+    const entries = targets.length ? toEntries(rowsFor(targets, true)) : [];
     if (entries.some((x) => x.kind === "manual")) return null;
     for (const x of entries) x.parent = parent;
     return entries;
   };
 
   // ---------- queue (saved locally, one list per character name) ----------
-  // gather and craft run a game action, manual waits for the player, train plans the next batch of steps
-  const KINDS = new Set(["gather", "craft", "manual", "train"]);
+  // gather and craft run a game action until you have more of an item, skill runs one until it has given enough XP,
+  // manual waits for the player, train plans the next batch of steps
+  const KINDS = new Set(["gather", "craft", "skill", "manual", "train"]);
   const Queue = {
     items: [],
     key: () => `mst-th-queue:${game.characterName ?? "default"}`,
@@ -205,6 +275,7 @@ export function setup(ctx) {
       s.onAreaFishSelection(area, a); s.onAreaStartButtonClick(area);
     },
     "melvorD:Cooking": (s, a) => { s.onRecipeSelectionClick(a); s.onActiveCookButtonClick(a.category); },
+    "melvorD:Firemaking": (s, a) => { s.selectLog(a); if (!s.isActive) s.burnLog(); },
   };
   const startCraft = (s, a, e) => {
     if (typeof s.selectRecipeOnClick !== "function" || typeof s.createButtonOnClick !== "function") return fail(`automating ${nm(s)} isn't supported yet`);
@@ -213,18 +284,20 @@ export function setup(ctx) {
     if (!s.isActive) s.createButtonOnClick();
   };
   const startAction = (e) => {
-    const skill = skillById(e.skillId), a = actionById(skill, e.actionId);
-    if (!a) return fail("this action wasn't found in your game version");
-    if (a.level > skill.level) return fail(`needs ${nm(skill)} level ${a.level}`);
+    const skill = skillById(e.skillId), m = methodById(skill, e.actionId), safety = m?.safe?.();
+    if (!m) return fail("this action wasn't found in your game version");
+    if (m.level > skill.level) return fail(`needs ${nm(skill)} level ${m.level}`);
+    if (m.need?.()) return fail(m.need());
+    if (safety && !safety.ok) return fail(`not safe while you're away: ${safety.why}`);
     try {
       if (game.activeAction && game.activeAction !== skill) game.stopActiveAction();
       if (skill.isActive && skill.stop() === false) return fail("couldn't stop the current activity");
-      const r = (STARTERS[skill.id] ?? startCraft)(skill, a, e);
+      const r = m.start(e);
       if (r) return r;
     } catch (err) { return fail("error: " + err.message); }
     if (skill.isActive) return { ok: true };
-    const craft = e.kind === "craft";
-    return fail(craft ? "not enough materials (or level too low)" : "the game wouldn't start it", { noMaterials: craft && lvl(a) <= skill.level });
+    const costly = (m.options[e.altIndex ?? 0] ?? m.options[0]).costs.length > 0 && e.kind !== "gather";
+    return fail(costly ? "not enough materials (or level too low)" : "the game wouldn't start it", { noMaterials: costly && m.level <= skill.level });
   };
 
   // ---------- time estimates (base speeds; the active entry switches to its measured speed after a few seconds) ----------
@@ -233,9 +306,10 @@ export function setup(ctx) {
     if (e.kind === "train") return trainEstimate(e);
     const units = Math.max(0, e.qty - Runner.gained(e));
     if (units <= 0) return 0;
-    const skill = skillById(e.skillId), a = actionById(skill, e.actionId);
-    if (!a) return null;
-    let per = e.kind === "gather" ? intervalMs(skill, a) / Math.max(1, a.baseQuantity ?? 1) : intervalMs(skill, a) / perAttempt(skill, a, { mult: options(a)[e.altIndex ?? 0]?.mult ?? 1 });
+    const m = methodById(skillById(e.skillId), e.actionId);
+    if (!m) return null;
+    // ms per unit: per item for gather and craft, per XP for a skill step
+    let per = e.kind === "skill" ? m.ms / Math.max(1e-9, m.xp * m.succ) : e.kind === "gather" ? m.ms / Math.max(1, m.qty) : m.ms / perAttempt(m, { mult: m.options[e.altIndex ?? 0]?.mult ?? 1 });
     if (Runner.state === "running" && Runner.activeId === e.id && e.t0 !== undefined) {
       const dt = Date.now() - e.t0, dg = Runner.gained(e) - e.g0;
       if (dt > 10000 && dg > 0) per = dt / dg;
@@ -271,7 +345,9 @@ export function setup(ctx) {
       if (e.status === "blocked" || e.status === "waiting") e.status = "pending";
       if (this.state === "running") { this.step(); Panel.render(); } else this.start();
     },
-    gained: (e) => (e.kind === "train" ? Math.floor(skillById(e.skillId)?.xp ?? 0) : e.startQty === undefined ? 0 : Math.max(0, owned(itemById(e.itemId)) - e.startQty)),
+    // what a step counts: XP for skill steps, otherwise how many of its item you own
+    value: (e) => (e.kind === "skill" ? Math.floor(skillById(e.skillId)?.xp ?? 0) : owned(itemById(e.itemId))),
+    gained(e) { return e.kind === "train" ? Math.floor(skillById(e.skillId)?.xp ?? 0) : e.startQty === undefined ? 0 : Math.max(0, this.value(e) - e.startQty); },
     halt(skillId = this.activeSkillId) { const s = skillId && skillById(skillId); try { if (s && game.activeAction === s) game.stopActiveAction(); } catch (e) { console.warn(TAG, e); } },
     release() { this.activeId = null; this.activeSkillId = null; },
     leave() {
@@ -347,17 +423,17 @@ export function setup(ctx) {
           this.leave();
           Object.assign(this, { activeId: cur.id, activeSkillId: cur.skillId ?? null });
           cur.status = "active"; delete cur.reason;
-          if (cur.kind !== "manual" && cur.startQty === undefined) cur.startQty = owned(itemById(cur.itemId));
+          if (cur.kind !== "manual" && cur.startQty === undefined) cur.startQty = this.value(cur);
           Queue.save();
           if (cur.kind !== "manual") {
             const r = startAction(cur);
-            // a craft with no materials is handled below: it adds the steps to get them
-            if (!r.ok && !(cur.kind === "craft" && r.noMaterials)) return r.transient ? this.wait(r.reason) : this.block(cur, r.reason);
+            // a step with no materials is handled below: it adds the steps to get them
+            if (!r.ok && !r.noMaterials) return r.transient ? this.wait(r.reason) : this.block(cur, r.reason);
           }
           Object.assign(cur, { t0: Date.now(), g0: this.gained(cur) });
         }
 
-        const got = owned(itemById(cur.itemId));
+        const got = this.value(cur);
         if (cur.kind === "manual") {
           if (got >= cur.qty || cur.ack) { this.finish(cur); continue; }
           cur.status = "waiting";
@@ -368,7 +444,9 @@ export function setup(ctx) {
         if (us && (us.level >= cur.untilLevel || (cur.untilXp && (us.xp ?? 0) >= cur.untilXp))) { this.finish(cur); continue; }
         if (got - (cur.startQty ?? 0) >= cur.qty) { this.finish(cur); continue; }
 
-        const skill = skillById(cur.skillId);
+        const skill = skillById(cur.skillId), safety = methodById(skill, cur.actionId)?.safe?.();
+        // the food can run out while thieving: stop before it isn't safe any more
+        if (safety && !safety.ok) return this.block(cur, `not safe while you're away: ${safety.why}`);
         if (skill && skill.isActive && game.activeAction === skill) return Panel.render();
         if (game.activeAction && game.activeAction !== skill) return this.pause("Paused: something else started running.");
 
@@ -377,27 +455,27 @@ export function setup(ctx) {
         if (r.ok) return Panel.render();
         if (r.transient) return this.wait(r.reason);
         const made = this.gained(cur), of = `(${num(made)} of ${num(cur.qty)} done)`;
-        if (!(r.noMaterials && cur.kind === "craft")) return this.block(cur, `${r.reason} ${of}`);
+        if (!r.noMaterials) return this.block(cur, `${r.reason} ${of}`);
         cur.restockStall = cur.restockMade !== undefined && made <= cur.restockMade ? (cur.restockStall ?? 0) + 1 : 0;
         cur.restockMade = made;
         const rs = restockCraft(cur);
         if (!rs.ok || cur.restockStall >= 2) return this.block(cur, `${rs.ok ? "it keeps running out of materials without making more" : rs.reason} ${of}`);
         cur.restocks = (cur.restocks ?? 0) + 1;
         Queue.insertBefore(cur.id, rs.entries);
-        this.message = `Short of materials for ${nm(itemById(cur.itemId))}: getting ${num(rs.remaining)} more worth`;
+        this.message = cur.kind === "skill" ? `Short of materials for ${rs.name}: getting enough for ${plural(rs.crafts, "more try", "more tries")}` : `Short of materials for ${nm(itemById(cur.itemId))}: getting ${num(rs.remaining)} more worth`;
       }
     },
   };
   // A craft step ran out of ingredients before it made enough (Cooking burns food, Smithing and others can come up short):
   // work out what is still missing and the steps that get it
   const restockCraft = (e) => {
-    const skill = skillById(e.skillId), a = actionById(skill, e.actionId), item = itemById(e.itemId);
-    if (!a || !item) return fail("this action wasn't found in your game version");
-    const opt = options(a)[e.altIndex ?? 0] ?? { costs: [], mult: 1 };
-    const remaining = e.qty - Math.max(0, owned(item) - (e.startQty ?? 0));
-    const entries = materialSteps(a, opt, Math.max(1, Math.ceil(remaining / perAttempt(skill, a, opt))), e.parent ?? e.id);
-    if (!entries) return fail(`${nm(item)} needs something the queue can't get on its own`);
-    return entries.length ? { ok: true, entries, remaining } : fail("not enough materials (or level too low)");
+    const m = methodById(skillById(e.skillId), e.actionId), item = itemById(e.itemId), name = e.kind === "skill" ? m?.name : nm(item);
+    if (!m || (e.kind !== "skill" && !item)) return fail("this action wasn't found in your game version");
+    const opt = m.options[e.altIndex ?? 0] ?? m.options[0], remaining = e.qty - Runner.gained(e);
+    const crafts = Math.max(1, Math.ceil(remaining / (e.kind === "skill" ? Math.max(1e-9, m.xp * m.succ) : perAttempt(m, opt))));
+    const entries = materialSteps(opt.costs, crafts, e.parent ?? e.id);
+    if (!entries) return fail(`${name} needs something the queue can't get on its own`);
+    return entries.length ? { ok: true, entries, remaining, crafts, name } : fail("not enough materials (or level too low)");
   };
 
   // ---------- train a skill ----------
@@ -412,41 +490,48 @@ export function setup(ctx) {
 
   // time (ms) to get n of an item from scratch with things the queue can do itself; Infinity if it can't.
   // Also returns the XP those steps give in `skillId` (smelting bars trains Smithing too).
-  const acquire = (item, n, lv, skillId, seen = new Set(), depth = 0) => {
+  const makeTime = (item, n, lv, skillId, seen = new Set(), depth = 0) => {
     if (!(n > 0)) return { ms: 0, xp: 0 };
     const NO = { ms: Infinity, xp: 0 }, c = crafter(item.id), g = !c && gatherer(item.id), x = c || g;
-    if (depth > 10 || seen.has(item.id) || !x || lvl(x.a) > levelIn(x.skill, lv)) return NO;
-    if (g) { const acts = n / Math.max(1, g.a.baseQuantity ?? 1); return { ms: acts * intervalMs(g.skill, g.a), xp: g.skill.id === skillId ? acts * (g.a.baseExperience ?? 0) : 0 }; }
-    const opt = options(c.a)[0], sr = succ(c.skill, c.a), crafts = n / perAttempt(c.skill, c.a, opt); // attempts, not rounded: ranks methods by their steady rate
-    const r = { ms: crafts * intervalMs(c.skill, c.a), xp: c.skill.id === skillId ? crafts * sr * (c.a.baseExperience ?? 0) : 0 };
+    if (depth > 10 || seen.has(item.id) || !x || x.a.level > levelIn(x.skill, lv) || x.a.need?.(lv)) return NO;
+    if (g) { const acts = n / Math.max(1, g.a.qty); return { ms: acts * g.a.ms, xp: g.skill.id === skillId ? acts * g.a.xp : 0 }; }
+    const opt = c.a.options[0], crafts = n / perAttempt(c.a, opt); // attempts, not rounded: ranks methods by their steady rate
+    const r = { ms: crafts * c.a.ms, xp: c.skill.id === skillId ? crafts * c.a.succ * c.a.xp : 0 };
     seen.add(item.id);
-    for (const k of costsOf(c.a, opt)) { const s = acquire(k.item, k.quantity * crafts, lv, skillId, seen, depth + 1); r.ms += s.ms; r.xp += s.xp; }
+    for (const k of opt.costs) { const s = acquire(k.item, k.quantity * crafts, lv, skillId, seen, depth + 1); r.ms += s.ms; r.xp += s.xp; }
     seen.delete(item.id);
     return r;
   };
-  // the same step the queue would really run for this product (first crafter, or first gatherer)
-  const stepFor = (a) => {
-    if (!a.product) return null;
-    const c = crafter(a.product.id), g = gatherer(a.product.id);
-    return c ? (c.a === a ? { craft: true } : null) : g?.a === a ? { craft: false } : null;
+  // the same, but what the queue can't get itself is free while the bank holds enough of it (shards, feathers, bones)
+  const acquire = (item, n, lv, skillId, seen, depth) => { const r = makeTime(item, n, lv, skillId, seen, depth); return isFinite(r.ms) || owned(item) < n ? r : { ms: 0, xp: 0 }; };
+  // how many attempts the bank allows for the costs the queue can't get itself
+  const stockCap = (costs) => Math.min(Infinity, ...costs.filter((k) => !isFinite(makeTime(k.item, 1).ms)).map((k) => Math.floor(owned(k.item) / k.quantity)));
+  // the same step the queue would really run for this product (first crafter, or first gatherer). Methods that make nothing,
+  // and extra ways to make something (Superheat), run as their own XP step.
+  const stepFor = (m) => {
+    if (!m.product) return { craft: m.options[0].costs.length > 0, own: true };
+    const c = crafter(m.product.id), g = gatherer(m.product.id);
+    return c ? (c.a === m ? { craft: true } : null) : g?.a === m ? { craft: false } : m.own ? { craft: true, own: true } : null;
   };
   // training methods open at this level, best first by XP per hour of everything they need
   const trainCands = (skill, lv) => {
     const out = [], L = levelIn(skill, lv);
-    for (const a of list(skill.actions)) {
-      const st = inMelvor(a) && lvl(a) <= L && a.baseExperience > 0 && a.product && stepFor(a);
+    for (const m of methodsOf(skill)) {
+      const st = m.level <= L && m.xp > 0 && !m.need?.(lv) && m.safe?.().ok !== false && stepFor(m);
       if (!st) continue;
-      const opt = st.craft ? options(a)[0] : { costs: [], mult: 1 }, sr = succ(skill, a);
-      let ms = intervalMs(skill, a), xpPer = a.baseExperience * sr, mast = 0;
-      if (st.craft) for (const k of costsOf(a, opt)) { const r = acquire(k.item, k.quantity, lv, skill.id); ms += r.ms; xpPer += r.xp; }
+      const opt = st.craft ? m.options[0] : NO_COSTS[0];
+      let ms = m.ms, xpPer = m.xp * m.succ, mast = 0;
+      if (st.craft) for (const k of opt.costs) { const r = acquire(k.item, k.quantity, lv, skill.id); ms += r.ms; xpPer += r.xp; }
       if (!isFinite(ms) || ms <= 0) continue;
-      if (mastery() && a.hasMastery !== false) {
-        try { if (skill.getMasteryLevel(a) < 99) mast = Number(skill.getMasteryXPToAddForAction(a, intervalMs(skill, a))) || 0; } catch (e) { /* no mastery */ }
+      if (mastery() && m.a.hasMastery !== false) {
+        try { if (skill.getMasteryLevel(m.a) < 99) mast = Number(skill.getMasteryXPToAddForAction(m.a, m.ms)) || 0; } catch (e) { /* no mastery */ }
       }
-      out.push({ a, per: perAttempt(skill, a, opt), ms, xpPer, mast, rate: (xpPer / ms) * 3600000, score: ((xpPer + mast) / ms) * 3600000 });
+      out.push({ a: m, st, opt, per: perAttempt(m, opt), ms, xpPer, mast, rate: (xpPer / ms) * 3600000, score: ((xpPer + mast) / ms) * 3600000 });
     }
     return out.sort((x, y) => y.score - x.score);
   };
+  // why nothing at this level can be trained, when it's about safety (Thieving with no food or auto eat)
+  const unsafeWhy = (skill) => methodsOf(skill).map((m) => m.level <= skill.level && m.safe?.()).find((r) => r && !r.ok)?.why;
   const trainPlan = (skill, target, forcedId, fromLevel = skill.level, fromXp = skill.xp ?? 0, seed = null) => {
     const sim = new Map(seed ?? []), batches = [];
     let L = fromLevel, cur = null, blocked = null;
@@ -483,7 +568,7 @@ export function setup(ctx) {
         const bestRate = (lv, L) => trainCands(skill, lv.set(skill.id, L))[0]?.score ?? 0;
         for (const S of GATHER_SKILLS.map(skillById)) {
           if (!S || S === skill || !isTrainable(S)) continue;
-          const levels = [...new Set(list(S.actions).filter((a) => inMelvor(a) && lvl(a) > S.level && lvl(a) <= S.level + 30).map(lvl))].sort((x, y) => x - y);
+          const levels = [...new Set(list(S.actions).filter((a) => realmOk(a) && lvl(a) > S.level && lvl(a) <= S.level + 30).map(lvl))].sort((x, y) => x - y);
           for (const R of levels) {
             // quick filter: does opening this level make any method better, now or near the end of the run?
             const better = (L) => { const was = bestRate(new Map(), L), now = bestRate(new Map([[S.id, R]]), L); return now > was * 1.1 || (was === 0 && now > 0); };
@@ -511,17 +596,27 @@ export function setup(ctx) {
     };
     const b = trainPlan(skill, e.targetLevel, e.forced).batches[0];
     if (!b) {
-      const fa = e.forced && actionById(skill, e.forced);
-      return fail(fa ? `${nm(fa)} can't be trained by the queue at level ${skill.level}` : `nothing at ${nm(skill)} level ${skill.level} can be trained by the queue on its own (it may need shop items or monster drops)`);
+      const fm = e.forced && methodById(skill, e.forced), why = unsafeWhy(skill);
+      return fail(fm ? `${fm.name} can't be trained by the queue at level ${skill.level}` : why ? `nothing at ${nm(skill)} level ${skill.level} is safe while you're away: ${why}`
+        : `nothing at ${nm(skill)} level ${skill.level} can be trained by the queue on its own (it may need shop items or monster drops)`);
     }
-    const actions = Math.max(1, Math.ceil((Math.min(xpAt(b.to), e.targetXp ?? Infinity) - (skill.xp ?? 0)) / b.c.xpPer));
-    const item = b.c.a.product, entries = toEntries(buildRows(item, Math.ceil(actions * b.c.per), true)), last = entries[entries.length - 1];
+    const m = b.c.a, goalXp = Math.min(xpAt(b.to), e.targetXp ?? Infinity), note = `${m.name} until level ${b.to} (about ${num(Math.round(b.c.rate))} XP/h)`;
+    const actions = Math.max(1, Math.min(stockCap(b.c.opt.costs), Math.ceil((goalXp - (skill.xp ?? 0)) / b.c.xpPer)));
+    // a method that makes nothing (or isn't the usual way to make its product) runs as an XP step after its materials
+    if (b.c.st.own) {
+      const entries = materialSteps(b.c.opt.costs, actions, e.id), xpPer = m.xp * m.succ;
+      if (!entries) return fail(`${m.name} needs something the queue can't get on its own`);
+      const last = { kind: "skill", skillId: skill.id, actionId: m.id, qty: Math.ceil(actions * xpPer), untilLevel: b.to, untilSkill: skill.id, parent: e.id, label: `${nm(skill)}: ${m.name}` };
+      if (e.targetXp !== undefined && e.targetXp <= xpAt(b.to)) last.untilXp = e.targetXp;
+      return { ok: true, entries: [...entries, last], to: b.to, note };
+    }
+    const item = m.product, entries = toEntries(buildRows(item, Math.ceil(actions * b.c.per), true)), last = entries[entries.length - 1];
     if (last?.itemId !== item.id) return fail("couldn't work out the steps");
     if (entries.some((x) => x.kind === "manual")) return fail(`${nm(item)} needs something the queue can't get on its own`);
     Object.assign(last, { untilLevel: b.to, untilSkill: skill.id, sellAll: !!e.sellMade });
     if (e.targetXp !== undefined && e.targetXp <= xpAt(b.to)) last.untilXp = e.targetXp;
     for (const x of entries) x.parent = e.id;
-    return { ok: true, entries, to: b.to, note: `${nm(b.c.a)} until level ${b.to} (about ${num(Math.round(b.c.rate))} XP/h)` };
+    return { ok: true, entries, to: b.to, note };
   };
   const trainEstimate = (e) => {
     const sk = skillById(e.skillId);
@@ -534,21 +629,24 @@ export function setup(ctx) {
     });
   };
   const rowsMs = (rows) => rows.reduce((s, n) => {
-    if (n.recipe) return s + n.recipe.crafts * intervalMs(n.recipe.c.skill, n.recipe.c.a);
+    if (n.recipe) return s + n.recipe.crafts * n.recipe.c.a.ms;
     const g = gatherer(n.item.id);
-    return s + (g ? (n.qty * intervalMs(g.skill, g.a)) / Math.max(1, g.a.baseQuantity ?? 1) : 0);
+    return s + (g ? (n.qty * g.a.ms) / Math.max(1, g.a.qty) : 0);
   }, 0);
 
   // ----- the Train a skill window -----
   const TS = { skillId: null, goal: "level", make: null, qty: 100, level: null, forced: "", sell: false };
-  const trainSkills = () => list(game.skills).filter(isTrainable);
-  const makeables = (skill) => list(skill.actions).filter((a) => inMelvor(a) && stepFor(a)).sort((x, y) => lvl(x) - lvl(y));
+  // skills with something to do (Harvesting stays hidden until the Abyssal realm is unlocked)
+  const trainSkills = () => list(game.skills).filter((s) => isTrainable(s) && methodsOf(s).length);
+  // items a skill can be asked to make: its methods that are the usual way to make their product
+  const makeables = (skill) => methodsOf(skill).filter((m) => m.product && stepFor(m) && !stepFor(m).own).sort((x, y) => x.level - y.level);
   const fixTrain = () => {
     let sk = skillById(TS.skillId);
     if (!isTrainable(sk)) { const open = skillById(game.openPage?.id); sk = isTrainable(open) ? open : trainSkills()[0]; TS.skillId = sk?.id ?? null; }
     if (!sk) return;
-    const ms = makeables(sk), ok = ms.filter((a) => lvl(a) <= sk.level), cap = levelCap(sk);
-    if (!ms.some((a) => a.id === TS.make)) TS.make = (ok[ok.length - 1] ?? ms[0])?.id ?? null;
+    const ms = makeables(sk), ok = ms.filter((m) => m.level <= sk.level), cap = levelCap(sk);
+    if (!ms.length) TS.goal = "level"; // Thieving, Firemaking and others make nothing to ask for
+    if (!ms.some((m) => m.id === TS.make)) TS.make = (ok[ok.length - 1] ?? ms[0])?.id ?? null;
     if (!(TS.level > sk.level) || TS.level > cap) TS.level = Math.min(cap, Math.max(sk.level + 1, Math.ceil((sk.level + 1) / 10) * 10));
     if (TS.forced && !trainCands(sk).some((c) => c.a.id === TS.forced)) TS.forced = "";
   };
@@ -561,9 +659,9 @@ export function setup(ctx) {
     const sk = skillById(TS.skillId);
     return `<div class="mst-form">` +
       field("Skill", select("mst-tr-skill", trainSkills().map((s) => opt(s.id, `${nm(s)} (level ${s.level})`, s.id === TS.skillId)).join(""))) +
-      field("Goal", select("mst-tr-goal", opt("level", "Train to a level", TS.goal === "level") + opt("make", "Make an amount of an item", TS.goal === "make"))) +
+      field("Goal", select("mst-tr-goal", opt("level", "Train to a level", TS.goal === "level") + (makeables(sk).length ? opt("make", "Make an amount of an item", TS.goal === "make") : ""))) +
       (TS.goal === "make"
-        ? field("Item", select("mst-tr-item", makeables(sk).map((a) => opt(a.id, `${nm(a.product)} (level ${lvl(a)}${lvl(a) > sk.level ? ", locked" : ""})`, a.id === TS.make)).join(""))) +
+        ? field("Item", select("mst-tr-item", makeables(sk).map((m) => opt(m.id, `${nm(m.product)} (level ${m.level}${m.level > sk.level ? ", locked" : ""})`, m.id === TS.make)).join(""))) +
           field("Amount", numberInput("mst-tr-qty", TS.qty, 'min="1"'))
         : field("Target level", numberInput("mst-tr-level", TS.level, `min="${sk.level + 1}" max="${levelCap(sk)}"`)) +
           field("Method", select("mst-tr-method", opt("", "Best available (recommended)", !TS.forced) + trainCands(sk).map((c) => opt(c.a.id, `${nm(c.a)} (about ${num(Math.round(c.rate))} XP/h)`, c.a.id === TS.forced)).join(""))) +
@@ -572,12 +670,12 @@ export function setup(ctx) {
   };
   const nothing = (problem, html = note(esc(problem))) => ({ html, entries: [], problem });
   const trainMake = (sk) => {
-    const act = actionById(sk, TS.make), qty = Math.max(1, Math.floor(TS.qty || 0)), item = act?.product;
+    const act = methodById(sk, TS.make), qty = Math.max(1, Math.floor(TS.qty || 0)), item = act?.product;
     if (!item) return nothing("Pick an item first.", "");
     const miss = itemMissing(item, qty, true);
     if (miss.length) return nothing("You don't meet the requirements for that yet.", missingHtml(miss));
     const rows = buildRows(item, qty, true), entries = toEntries(rows);
-    const xp = Math.ceil(qty / Math.max(1, (act.baseQuantity ?? 1) * (stepFor(act)?.craft ? options(act)[0].mult : 1))) * (act.baseExperience ?? 0);
+    const xp = Math.ceil(qty / Math.max(1, act.qty * (stepFor(act)?.craft ? act.options[0].mult : 1))) * act.xp;
     const head = step(`<div class="mst-title">${icon(item)}<b>Make ${num(qty)} ${esc(nm(item))}</b></div>` +
       chips(chip(`About ${fmtDur(rowsMs(rows))}`, "ok", "Base speed, counting what your bank already holds"), chip(`${num(xp)} ${esc(nm(sk))} XP`, "", "Base XP, before bonuses")));
     return { html: dupHtml(entries) + head + itemSection(rows), entries };
@@ -587,7 +685,7 @@ export function setup(ctx) {
     if (!(L > sk.level) || L > cap) return nothing(sk.level >= cap ? `${nm(sk)} is already at its highest level.` : `Pick a target level between ${sk.level + 1} and ${cap}.`);
     const plan = trainPlan(sk, L, TS.forced || null);
     if (!plan.batches.length) {
-      const msg = "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
+      const why = unsafeWhy(sk), msg = why ? `Nothing here is safe for the queue to train while you're away: ${why}.` : "Nothing here can be trained by the queue on its own at your level (it may need shop items or monster drops).";
       return nothing(msg, step(chips(chip(`${warnIcon}${esc(msg)}`, "warn"))));
     }
     const entries = [{ kind: "train", skillId: sk.id, targetLevel: L, targetXp: xpAt(L), qty: xpAt(L), forced: TS.forced || undefined, sellMade: TS.sell, label: `${nm(sk)}: reach level ${L}` }];
@@ -599,12 +697,12 @@ export function setup(ctx) {
       chips(chip(`About ${fmtDur(dt.detourMs)}`), chip(`Saves about ${fmtDur(dt.saveMs)}`, "ok", "Compared with staying on the methods you can use now")) +
       note(`Better ${esc(nm(sk))} methods need materials from ${esc(nm(dt.skill))} level ${dt.level}, so the queue trains it first.`));
     html += plan.batches.map((b, i) => {
-      const a = b.c.a, uses = stepFor(a)?.craft ? costsOf(a).map((k) => chip(`${icon(k.item)}${num(k.quantity)} ${esc(nm(k.item))}`)).join("") : "";
-      return step(`<div class="mst-stepno">${i === 0 ? "Starting at" : "Then at"} level ${b.from}${b.to > b.from ? ` (to ${b.to})` : ""}</div><div class="mst-title">${icon(a.product)}<b>${esc(nm(a))}</b></div>` +
+      const a = b.c.a, uses = b.c.st.craft ? b.c.opt.costs.map((k) => chip(`${icon(k.item)}${num(k.quantity)} ${esc(nm(k.item))}`)).join("") : "";
+      return step(`<div class="mst-stepno">${i === 0 ? "Starting at" : "Then at"} level ${b.from}${b.to > b.from ? ` (to ${b.to})` : ""}</div><div class="mst-title">${icon(a)}<b>${esc(a.name)}</b></div>` +
         chips(chip(`${num(Math.round(b.c.rate))} XP/hour`, "", "Counting the time to gather or make what it needs"), chip(`About ${fmtDur(b.ms)}`)) + (uses ? chips(chip("<b>Each uses</b>", "lbl"), uses) : ""));
     }).join("");
     const okIds = !TS.forced && new Set(trainCands(sk).map((c) => c.a.id));
-    const skipped = okIds && list(sk.actions).some((a) => lvl(a) <= sk.level && a.baseExperience > 0 && a.product && !okIds.has(a.id) && xpRate(sk, a) > plan.batches[0].c.rate);
+    const skipped = okIds && methodsOf(sk).some((m) => m.level <= sk.level && m.xp > 0 && m.safe?.().ok !== false && !okIds.has(m.id) && xpRate(m) > plan.batches[0].c.rate);
     html += note("Methods are ranked by XP per hour including the time to gather what they need, so it won't farm a mountain of materials for little XP. The queue re-checks your level and bank after every batch." +
       (skipped ? " Some faster methods are left out because their materials need higher levels in other skills, or come from the shop or monsters." : ""));
     return { html, entries };
@@ -678,8 +776,8 @@ export function setup(ctx) {
   // ---------- floating panel ----------
   const POS_KEY = "mst-th-panel-pos";
   const levelIssue = (e) => {
-    const sk = skillById(e.skillId), a = (e.kind === "craft" || e.kind === "gather") && actionById(sk, e.actionId);
-    return a && lvl(a) > sk.level ? `Needs ${nm(sk)} level ${a.level} (you have ${sk.level})` : null;
+    const sk = skillById(e.skillId), m = ["craft", "gather", "skill"].includes(e.kind) && methodById(sk, e.actionId);
+    return m && m.level > sk.level ? `Needs ${nm(sk)} level ${m.level} (you have ${sk.level})` : null;
   };
   const toggleSetting = (name) => { Settings.set(name, !Settings.get(name)); Panel.last = ""; Panel.render(); };
   const ACTS = {
@@ -722,14 +820,15 @@ export function setup(ctx) {
         : e.status === "blocked" || e.status === "waiting" || issue ? '<i class="fa fa-exclamation-triangle text-warning mr-2"></i>'
         : '<i class="fa fa-circle mr-2" style="opacity:.25;font-size:8px;vertical-align:middle"></i>';
       const showProgress = !manual && !done && e.startQty !== undefined && (e.status === "active" || e.status === "blocked" || Runner.gained(e) > 0);
-      const amount = isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}` : `x${num(e.qty)}`;
+      const xpUnit = e.kind === "skill" ? " XP" : "";
+      const amount = isTrain ? `Level ${skillById(e.skillId)?.level ?? 0} / ${e.targetLevel}` : showProgress ? `${num(Runner.gained(e))} / ${num(e.qty)}${xpUnit}` : e.kind === "skill" ? `${num(e.qty)} XP` : `x${num(e.qty)}`;
       const btn = (act, ic, title, cls = "text-white-50") => `<a data-act="${act}" data-id="${esc(e.id)}" class="pointer-enabled ${cls} ml-2" title="${title}"><i class="fa ${ic}"></i></a>`;
       const sub = done && e.sold ? small("text-muted", esc(e.sold)) : e.reason ? small("text-warning", esc(e.reason))
         : issue ? small("text-warning", `<i class="fa fa-exclamation-triangle"></i> ${esc(issue)}`)
         : isTrain && e.now && !done ? small("text-muted", `now: ${esc(e.now)}`)
         : manual && !done ? small("text-muted", `do this yourself${e.status === "waiting" ? " (waiting for you)" : ""}`) : "";
       return `<div style="display:flex;align-items:center;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.07);${done ? "opacity:.5" : ""}" ${manual ? `title="${esc(e.note ?? "")}"` : ""}>` +
-        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
+        `<div style="flex:1;min-width:0">${lead}${icon(isTrain ? skillById(e.skillId) : e.kind === "skill" ? methodById(skillById(e.skillId), e.actionId) ?? skillById(e.skillId) : itemById(e.itemId))}<span class="${manual ? "text-muted font-italic" : ""}" style="${done ? "text-decoration:line-through" : ""}">${esc(e.label)}</span> <b>${amount}</b>` +
         `${Runner.focusId === e.id ? ' <span class="badge badge-success">first</span>' : ""}${sub}</div>` +
         (done ? btn("remove", "fa-times", "Remove") : btn("first", "fa-play-circle", "Do this first (keeps its place in the list)", "text-success") +
           btn("top", "fa-angle-double-up", "Move to top") + btn("up", "fa-arrow-up", "Move up") + btn("down", "fa-arrow-down", "Move down") + btn("remove", "fa-times", "Remove")) + `</div>`;

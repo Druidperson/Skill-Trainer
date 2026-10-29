@@ -17,6 +17,16 @@ Name an item and an amount. Make 500 Bronze Bars and the queue mines the ore, sm
 
 Some recipes need things the queue can't gather or craft, like feathers, herbs or monster drops. Those show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
 
+## Skills it can train
+
+Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic and Harvesting.
+
+- Firemaking, Thieving and Astrology don't make anything you'd ask for, so they only take level goals. Firemaking cuts the logs it needs first.
+- Thieving can hurt you when a pickpocket fails, so the queue only thieves when it's safe while you're away. That means food equipped and auto eat set to start above the target's biggest hit. If your food runs out, the queue stops.
+- Summoning shards come from the shop, so the queue uses the shards in your bank and plans around them. The same goes for anything else it can't get itself, like feathers or bones.
+- Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
+- Harvesting shows up once the Abyssal realm is unlocked.
+
 ## Reach a level
 
 Aim for a level and it works out the best method for each stretch of the climb. It counts everything a method takes, materials included, so you never end up farming ore for hours to earn a few points of XP. It only switches methods when a clearly better one opens up, so the plan doesn't turn into lots of tiny steps.
