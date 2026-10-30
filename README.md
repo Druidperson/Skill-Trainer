@@ -17,7 +17,7 @@ Add it to the queue and press Start. The queue panel is the Action Queue list bu
 
 Name an item and an amount. Make 500 Bronze Bars and the queue mines the ore, smelts it and stops at 500. If you already have some of the ore in your bank, it uses that first.
 
-Some recipes need things the queue can't gather or craft. Feathers, compost and shards come from the shop, and the queue asks you before every purchase. Herbs and monster drops show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
+Some recipes need things the queue can't gather or craft. Feathers, compost and shards come from the shop, and the queue asks you before every purchase unless you turn on auto-buy in Action Queue. Herbs and monster drops show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
 
 ## Skills it can train
 
@@ -26,7 +26,7 @@ Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafti
 - Firemaking, Thieving and Astrology don't make anything you'd ask for, so they only take level goals. Firemaking cuts the logs it needs first.
 - Thieving can hurt you when a pickpocket fails, so the queue only thieves when it's safe while you're away. That means food equipped and auto eat set to start above the target's biggest hit. If your food runs out, the queue stops.
 - Summoning shards come from the shop. The queue uses the ones in your bank first and asks before buying more.
-- Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
+- Magic trains with Alt Magic, using your runes. Superheat turns ores into bars, and Just Learning and Item Alchemy are cast on something the queue can gather or make, like arrowtips or bars. Alchemy goes for the item that makes the most GP. Your other bank items are never used.
 - Harvesting shows up once the Abyssal realm is unlocked.
 - Farming plants on the plots you've unlocked with seeds you own, waits for the crops and harvests them. Compost you own goes on the plots first, and a Farming goal offers to buy some so every crop grows. While crops grow, the queue works on other steps. Herbs for Herblore can come from Farming once you've unlocked Herb plots.
 - Agility runs the course you've built, and can build it for you too. See below.
