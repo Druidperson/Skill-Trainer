@@ -2,6 +2,8 @@
 
 Pick a skill, say how far you want to take it, and walk away. Skill Trainer works out the quickest way there, gathers the materials, crafts what it needs and keeps going until you hit your goal.
 
+Skill Trainer needs the Action Queue mod, which runs the steps. Install both.
+
 ## Getting started
 
 Open the bottom-right menu and press the chart button. Choose a skill, then choose what you're after:
@@ -9,13 +11,13 @@ Open the bottom-right menu and press the chart button. Choose a skill, then choo
 - A level, like Smithing 40
 - An amount of an item, like 500 Bronze Bars
 
-Add it to the queue and press Start. The queue panel is the list button right next to it.
+Add it to the queue and press Start. The queue panel is the Action Queue list button right next to it.
 
 ## Make an item
 
 Name an item and an amount. Make 500 Bronze Bars and the queue mines the ore, smelts it and stops at 500. If you already have some of the ore in your bank, it uses that first.
 
-Some recipes need things the queue can't gather or craft, like feathers, herbs or monster drops. Those show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
+Some recipes need things the queue can't gather or craft. Feathers, compost and shards come from the shop, and the queue asks you before every purchase. Herbs and monster drops show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
 
 ## Skills it can train
 
@@ -23,13 +25,13 @@ Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafti
 
 - Firemaking, Thieving and Astrology don't make anything you'd ask for, so they only take level goals. Firemaking cuts the logs it needs first.
 - Thieving can hurt you when a pickpocket fails, so the queue only thieves when it's safe while you're away. That means food equipped and auto eat set to start above the target's biggest hit. If your food runs out, the queue stops.
-- Summoning shards come from the shop, so the queue uses the shards in your bank and plans around them. The same goes for anything else it can't get itself, like feathers or bones.
+- Summoning shards come from the shop. The queue uses the ones in your bank first and asks before buying more.
 - Magic trains with Alt Magic: spells that only take runes and set items, and Superheat. It never casts spells that use up an item you pick, like Item Alchemy.
 - Harvesting shows up once the Abyssal realm is unlocked.
-- Farming plants on the plots you've unlocked with seeds you own, waits for the crops and harvests them. It never buys seeds, plots or compost, and it plants a few extra to cover crops that die. Herbs for Herblore can come from Farming once you've unlocked Herb plots.
+- Farming plants on the plots you've unlocked with seeds you own, waits for the crops and harvests them. Compost you own goes on the plots first, and a Farming goal offers to buy some so every crop grows. While crops grow, the queue works on other steps. Herbs for Herblore can come from Farming once you've unlocked Herb plots.
 - Agility runs the course you've built, and can build it for you too. See below.
-- Cartography trains by making paper from logs. Surveying the map is still up to you.
-- Archaeology digs at sites where you have a map with charges and your tools picked. Maps come from Cartography and aren't made for you.
+- Cartography trains by making paper from logs, or by surveying the map around where you stand.
+- Archaeology digs at sites where you have a map with charges. With no map, the goal offers to make one first and picks your tools for you.
 
 ## Agility course builder
 
@@ -45,9 +47,9 @@ Pick Agility in the Train window and it shows which empty slots it can fill, wit
 Combat skills train by fighting, with the gear you have on. The queue picks the fight with the best XP per hour that's safe while you're away. Safe means you have food equipped, auto eat starts above the monster's biggest hit (special attacks and the combat triangle included), and the monster can't take half your HP in one hit. If your food gets low, the queue stops before it runs out.
 
 - It sets the attack style that trains your skill, like Slash for Strength, and puts your own style back when the step ends.
-- Attack and Strength need a melee weapon, Ranged needs a bow and ammo, and Magic needs a magic weapon and a combat spell selected. Defence, Hitpoints, Prayer and Slayer work with whatever you have on.
-- Prayer turns on your best prayer for the fight and stops when you run out of prayer points.
-- Slayer fights in Slayer areas you can enter, or on your current Slayer task. It never picks a new task for you.
+- Attack and Strength need a melee weapon, Ranged needs a bow and ammo, and Magic needs a magic weapon and a combat spell selected. If one of your other equipment sets has the right weapon, the queue switches to it and back when the goal is done. If not, it waits for you to equip one. Defence, Hitpoints, Prayer and Slayer work with whatever you have on.
+- Prayer turns on your best prayer for the fight. When you run out of prayer points, it buries the cheapest bones in your bank.
+- Slayer fights in Slayer areas you can enter, or on your Slayer task. With no task, it asks before rolling one and tells you how many of that tier's monsters are safe for you.
 - If you start a fight yourself while the queue is running, it pauses and leaves your fight alone.
 
 ## Reach a level
@@ -64,16 +66,9 @@ Cooking burns food, so the queue gathers extra raw food to cover it. If a craft 
 
 Turn this on in the mod settings or in the Train window and the planner counts mastery XP next to skill XP. It also sticks with a method longer so its mastery keeps growing. It's off by default.
 
-## Small things that save time
-
-- It picks the best XP method you can actually use
-- Extras it makes along the way can be sold for you
-- You can drag the queue panel, reorder steps, pause and resume
-- Turn on auto-start and the queue begins as soon as you add something
-
 ## Works with Township Task Helper
 
-The two mods don't need each other. If you use both, each keeps its own queue, so run one queue at a time.
+Both mods add their steps to the same Action Queue, so you can use them together. There's one queue and one panel.
 
 ## Bugs and ideas
 

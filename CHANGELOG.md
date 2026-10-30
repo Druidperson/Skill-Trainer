@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0
+- Skill Trainer now needs the Action Queue mod. The queue, its panel and settings moved there, so Skill Trainer and Township Task Helper share one queue instead of each having their own. Install both.
+- Feathers, compost and Summoning shards can come from the shop. The queue asks you before every purchase.
+- Slayer goals with no task ask before rolling one, and show how many of its monsters are safe for you.
+- Archaeology goals with no map offer to make one and pick your tools.
+- Attack, Strength, Ranged and Magic switch to an equipment set with the right weapon, and back when done. If you have none, the queue waits for you to equip one.
+- Prayer buries your cheapest bones when you run out of points.
+- Farming uses compost you own and offers to buy some, and the queue works on other steps while crops grow.
+- Cartography can train by surveying the map around you.
+- Fixed: a Farming goal could stop when your seeds only just covered the batch.
+- Saved queues from 1.0.0 don't carry over.
+
 ## 1.0.0
 - First release. Skill Trainer is the Train a skill window from Township Task Helper, now its own mod that works without Township tasks.
 - Train to a level or make an amount of an item, for Woodcutting, Mining, Fishing, Cooking, Smithing, Fletching, Crafting, Runecrafting, Herblore, Firemaking, Thieving, Summoning, Astrology, Magic (Alt Magic) and Harvesting.
