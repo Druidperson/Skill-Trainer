@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0
+- Skill Trainer is now where everything about training lives: how to start each skill, what's safe, how to plan a goal, Farming, combat, Agility building, Slayer tasks and dig site maps. Action Queue only runs the queue, so it needs Skill Trainer to run training steps.
+- The "Prefer mastery XP" setting moved here from Action Queue.
+- Alt Magic can use Just Learning and Item Alchemy. They're cast on something the queue can gather or make, like arrowtips or bars, and Alchemy goes for the item that makes the most GP. Your other bank items are never used.
+- When nothing can be trained, the message says which material is missing, like Nature Runes before you can craft them.
+- Fixed: Alt Magic goals asked you to equip a magic weapon.
+- Farming harvests a crop that's already grown before it offers compost.
+
 ## 1.1.0
 - Skill Trainer now needs the Action Queue mod. The queue, its panel and settings moved there, so Skill Trainer and Township Task Helper share one queue instead of each having their own. Install both.
 - Feathers, compost and Summoning shards can come from the shop. The queue asks you before every purchase.

@@ -2,7 +2,7 @@
 
 Pick a skill, say how far you want to take it, and walk away. Skill Trainer works out the quickest way there, gathers the materials, crafts what it needs and keeps going until you hit your goal.
 
-Skill Trainer needs the Action Queue mod, which runs the steps. Install both.
+Skill Trainer needs the Action Queue mod, which holds the queue. Skill Trainer knows how to train each skill, and Action Queue runs the steps. Install both.
 
 ## Getting started
 
