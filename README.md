@@ -1,8 +1,12 @@
+![Skill Trainer](assets/banner.png)
+
 # Skill Trainer
 
 Pick a skill, say how far you want to take it, and walk away. Skill Trainer works out the quickest way there, gathers the materials, crafts what it needs and keeps going until you hit your goal.
 
-Skill Trainer needs the Action Queue mod, which holds the queue. Skill Trainer knows how to train each skill, and Action Queue runs the steps. Install both.
+## You need Action Queue
+
+Skill Trainer needs the [Action Queue](https://github.com/Druidperson/Action-Queue) mod to work. Skill Trainer plans the training and Action Queue holds the queue the steps run in. Install both from the Mod Manager. If Action Queue is missing, Skill Trainer tells you when the game loads and doesn't add its button.
 
 ## Getting started
 
@@ -11,13 +15,13 @@ Open the bottom-right menu and press the chart button. Choose a skill, then choo
 - A level, like Smithing 40
 - An amount of an item, like 500 Bronze Bars
 
-Add it to the queue and press Start. The queue panel is the Action Queue list button right next to it.
+Add it to the queue and press Start. The queue itself is the Action Queue list button right next to it.
 
 ## Make an item
 
 Name an item and an amount. Make 500 Bronze Bars and the queue mines the ore, smelts it and stops at 500. If you already have some of the ore in your bank, it uses that first.
 
-Some recipes need things the queue can't gather or craft. Feathers, compost and shards come from the shop, and the queue asks you before every purchase unless you turn on auto-buy in Action Queue. Herbs and monster drops show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
+Some recipes need things the queue can't gather or craft. Feathers, compost and shards come from the shop, and you're asked before every purchase unless you turn on auto-buy in Action Queue's settings. Herbs and monster drops show up as a step for you to do yourself. The queue waits there until you have them, then carries on.
 
 ## Skills it can train
 
@@ -65,10 +69,6 @@ Cooking burns food, so the queue gathers extra raw food to cover it. If a craft 
 ## Prefer mastery XP
 
 Turn this on in the mod settings or in the Train window and the planner counts mastery XP next to skill XP. It also sticks with a method longer so its mastery keeps growing. It's off by default.
-
-## Works with Township Task Helper
-
-Both mods add their steps to the same Action Queue, so you can use them together. There's one queue and one panel.
 
 ## Bugs and ideas
 
