@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.3.0
+- Skill Trainer is part of Action Queue now (2.0.0 and later). This version doesn't do anything except tell you to uninstall it, so it can't clash with the new Action Queue.
+
 ## 1.2.0
 - Skill Trainer is now where everything about training lives: how to start each skill, what's safe, how to plan a goal, Farming, combat, Agility building, Slayer tasks and dig site maps. Action Queue only runs the queue, so it needs Skill Trainer to run training steps.
 - The "Prefer mastery XP" setting moved here from Action Queue.
